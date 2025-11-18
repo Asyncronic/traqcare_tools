@@ -1,9 +1,10 @@
 # TraqCare Tools
 
-Modern web-based diagnostic toolbox for IoT and fleet management teams with four powerful tools:
+Modern web-based diagnostic toolbox for IoT and fleet management teams with five powerful tools:
 
 - **TCP Client**: Send Hex/ASCII packets to device servers with support for batch and persistent connection modes
 - **UDP Client**: Send connectionless UDP datagrams with optional response waiting
+- **MQTT Client**: Connect to MQTT brokers, publish messages, and subscribe to topics with QoS support
 - **API Tester**: Test HTTP endpoints with custom headers, request bodies, and multiple HTTP methods
 - **FCM Sender**: Send Firebase Cloud Messaging (HTTP v1) push notifications for testing iOS and Android devices
 
@@ -27,6 +28,17 @@ Modern web-based diagnostic toolbox for IoT and fleet management teams with four
 - **Source Tracking**: Display source IP and port of received packets
 - **Real-time Logging**: Monitor sent datagrams and received responses
 - **State Persistence**: Automatically save and restore UDP settings
+
+### MQTT Client
+- **Broker Connection**: Connect to any MQTT broker (public or private)
+- **Publish Messages**: Send messages to topics with QoS 0, 1, or 2
+- **Subscribe to Topics**: Subscribe to topics with wildcard support (+, #)
+- **Message Retention**: Support for retained messages
+- **TLS/SSL Support**: Secure connections to brokers (MQTTS)
+- **Authentication**: Username and password authentication
+- **Real-time Updates**: Auto-polling for incoming messages
+- **Session Management**: Persistent connection with automatic timeout
+- **State Persistence**: Automatically save and restore MQTT settings
 
 ### API Tester
 - **Multiple HTTP Methods**: Support for GET, POST, PUT, PATCH, DELETE
@@ -60,9 +72,10 @@ Modern web-based diagnostic toolbox for IoT and fleet management teams with four
 - **Backend**: Express.js with ES modules
   - Node.js `net` module for TCP
   - Node.js `dgram` module for UDP
+  - `mqtt.js` library for MQTT client
   - Native `fetch` API for HTTP proxying
 - **Authentication**: Google Auth Library for FCM OAuth tokens
-- **Real-time Communication**: Server-Sent Events (SSE) for live TCP data streaming
+- **Real-time Communication**: Server-Sent Events (SSE) for live TCP data streaming, polling for MQTT messages
 - **Development**: Vite proxy for seamless API integration
 - **State Management**: LocalStorage-based persistence across all tools
 
@@ -146,6 +159,34 @@ npm run preview
   - Request body: `{ ip, port, packet, format, timeout, receive_response }`
   - Response: `{ sent, response, sourceIp, sourcePort }`
 
+### MQTT Client
+- `POST /api/mqtt/connect` - Connect to MQTT broker
+  - Establishes connection and returns sessionId
+  - Request body: `{ broker, port, clientId, username, password, useTLS }`
+  - Response: `{ sessionId, clientId, message, events }`
+
+- `POST /api/mqtt/publish` - Publish message to topic
+  - Requires active sessionId
+  - Request body: `{ sessionId, topic, message, qos, retain }`
+  - Response: `{ ok, topic, message, qos, retain, events }`
+
+- `POST /api/mqtt/subscribe` - Subscribe to topic
+  - Supports wildcards (+ for single level, # for multiple levels)
+  - Request body: `{ sessionId, topic, qos }`
+  - Response: `{ ok, topic, qos, subscriptions, events }`
+
+- `POST /api/mqtt/unsubscribe` - Unsubscribe from topic
+  - Request body: `{ sessionId, topic }`
+  - Response: `{ ok, topic, subscriptions, events }`
+
+- `GET /api/mqtt/status/:sessionId` - Get connection status and messages
+  - Returns connection state, subscriptions, and received messages
+  - Response: `{ connected, subscriptions, events, messages, totalMessages }`
+
+- `POST /api/mqtt/disconnect` - Disconnect from broker
+  - Request body: `{ sessionId }`
+  - Response: `{ ok, message, events, totalMessages }`
+
 ### API Tester
 - `POST /api/http-request` - Proxy HTTP request to external API
   - Supports GET, POST, PUT, PATCH, DELETE methods
@@ -194,6 +235,27 @@ npm run preview
 7. Click "Send Packet"
 8. View sent packet and any received responses in the log
 9. Note the source IP/port of responses
+
+### MQTT Client
+1. Navigate to the "MQTT Client" tab
+2. Enter broker host (e.g., broker.hivemq.com)
+3. Enter port (1883 for TCP, 8883 for TLS)
+4. (Optional) Enter client ID, username, and password
+5. Enable "Use TLS" for secure connections
+6. Click "Connect"
+7. **To Publish:**
+   - Enter topic name
+   - Select QoS level (0, 1, or 2)
+   - Enter message payload
+   - (Optional) Enable "Retain message"
+   - Click "Publish"
+8. **To Subscribe:**
+   - Enter topic (supports wildcards: test/# or sensor/+/temp)
+   - Select QoS level
+   - Click "Subscribe"
+   - Incoming messages appear automatically in the log
+   - Click ✕ on a subscription to unsubscribe
+9. Click "Disconnect" when finished
 
 ### API Tester
 1. Navigate to the "API Tester" tab
@@ -256,6 +318,19 @@ X-Custom-Header: custom-value
   ```
 - **Plain Text**: Any string content
 
+### MQTT Topics and Wildcards
+MQTT topics are hierarchical and support wildcards:
+- **Single-level wildcard (+)**: Matches one level
+  - `sensor/+/temperature` matches `sensor/room1/temperature` and `sensor/room2/temperature`
+- **Multi-level wildcard (#)**: Matches multiple levels (must be last character)
+  - `sensor/#` matches `sensor/temperature`, `sensor/room1/temperature`, `sensor/room1/humidity/current`
+- **No wildcards in publish**: Wildcards only work for subscriptions
+
+### MQTT Quality of Service (QoS)
+- **QoS 0**: At most once delivery (fire and forget, fastest)
+- **QoS 1**: At least once delivery (acknowledgment required, possible duplicates)
+- **QoS 2**: Exactly once delivery (slowest, guaranteed delivery without duplicates)
+
 ### FCM Custom Data
 Custom data fields use a simple `key=value` format (one per line):
 ```
@@ -311,6 +386,15 @@ userId=12345
 - Enable response waiting only if server replies to UDP packets
 - Check firewall rules for UDP traffic (different from TCP)
 
+### MQTT Connection Issues
+- Verify broker host and port are correct
+- Check if broker requires authentication (username/password)
+- Ensure TLS is enabled if connecting to port 8883
+- Test with public brokers first (broker.hivemq.com, test.mosquitto.org)
+- Check firewall rules for MQTT ports (1883, 8883)
+- Verify client ID is unique (or leave blank for auto-generation)
+- Sessions expire after 5 minutes of inactivity
+
 ### FCM Send Failures
 - Verify service account has `firebase.messaging` permissions
 - Check device token is valid and not expired
@@ -348,9 +432,10 @@ The backend maintains a pool of persistent TCP connections:
 - Multiple tabs can share the same session (using the same sessionId)
 
 ### State Persistence
-All four tools automatically save state to localStorage:
+All five tools automatically save state to localStorage:
 - **TCP Client**: IP, port, format, timeout, mode, last packets
 - **UDP Client**: IP, port, format, timeout, last packet
+- **MQTT Client**: Broker, port, credentials, topics, QoS settings
 - **API Tester**: Method, URL, headers, body, timeout
 - **FCM Sender**: Project ID, token, notification config, data fields
 

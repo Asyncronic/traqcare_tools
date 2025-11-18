@@ -341,35 +341,41 @@ This only happens when timeout is exactly 0. Any positive value works fine.
 
 Create an issue with the following information:
 
-**Title**: Clear, descriptive title (e.g., "Add support for MQTT protocol testing")
+**Title**: Clear, descriptive title (e.g., "Add WebSocket client for real-time testing")
 
 **Description**:
 ```markdown
 ## Enhancement Description
-Add MQTT protocol support as a fifth tool in the toolbox.
+Add WebSocket client support as a sixth tool in the toolbox.
 
 ## Motivation
-Many IoT devices use MQTT for communication. Adding MQTT support would make TraqCare Tools more comprehensive for IoT testing.
+Many modern IoT devices and web applications use WebSocket for bidirectional real-time communication. Adding WebSocket support would make TraqCare Tools more comprehensive for testing real-time protocols.
 
 ## Proposed Solution
-- Add new "MQTT Client" tab to the UI
-- Support publish/subscribe operations
-- Support QoS levels 0, 1, 2
-- Support TLS connections
-- Support username/password authentication
+- Add new "WebSocket Client" tab to the UI
+- Support connecting to WebSocket servers (ws:// and wss://)
+- Send and receive text/binary messages
+- Display real-time message stream
+- Support custom headers and subprotocols
+- Show connection events (open, close, error)
+- Message history with timestamps
 
 ## Alternatives Considered
-- Using external MQTT tools (less integrated)
-- Command-line MQTT clients (less user-friendly)
+- Using browser DevTools (less user-friendly, no history)
+- Command-line tools like wscat (not visual)
+- Postman/Insomnia (requires separate application)
 
 ## Additional Context
-Reference implementation: mosquitto.js or MQTT.js
-Similar to how TCP client works but with MQTT protocol specifics
+- WebSocket is widely used in IoT dashboards, live tracking, and chat applications
+- Complements existing TCP/UDP/MQTT tools for protocol testing
+- Would use native browser WebSocket API (no backend proxy needed)
+- Similar UI/UX to MQTT client with connect/disconnect flow
 
 ## Benefits
-- Completes the diagnostic toolbox for IoT protocols
-- Allows testing MQTT-based devices alongside TCP/UDP
-- Provides unified interface for all protocols
+- Enables testing WebSocket-based IoT devices and services
+- Allows debugging real-time web applications
+- Provides unified interface alongside TCP/UDP/MQTT
+- No backend changes needed (runs in browser)
 ```
 
 ## Questions?

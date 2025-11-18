@@ -14,6 +14,8 @@ function Header() {
           <span className="mx-3 opacity-40">•</span>
           <a href="#udp" className="hover:text-neutral-200">UDP</a>
           <span className="mx-3 opacity-40">•</span>
+          <a href="#mqtt" className="hover:text-neutral-200">MQTT</a>
+          <span className="mx-3 opacity-40">•</span>
           <a href="#api" className="hover:text-neutral-200">API</a>
           <span className="mx-3 opacity-40">•</span>
           <a href="#fcm" className="hover:text-neutral-200">FCM</a>
@@ -34,12 +36,13 @@ function Hero() {
         </h1>
         <p className="mt-4 text-neutral-400 md:text-lg">
           A focused toolbox for IoT & fleet teams: TCP/UDP clients to send Hex/ASCII to your device servers,
-          an API tester for HTTP requests, and a Firebase Cloud Messaging sender for quick notification tests.
+          MQTT client for pub/sub messaging, an API tester for HTTP requests, and a Firebase Cloud Messaging sender for quick notification tests.
         </p>
         <div className="mt-6 flex flex-wrap gap-3">
           <Badge>Hex / ASCII</Badge>
-          <Badge>Same connection</Badge>
-          <Badge>TLS-ready (via backend)</Badge>
+          <Badge>MQTT Pub/Sub</Badge>
+          <Badge>Persistent connections</Badge>
+          <Badge>TLS-ready</Badge>
           <Badge>FCM HTTP v1</Badge>
         </div>
       </div>
@@ -1316,6 +1319,536 @@ function UdpClientTool() {
   );
 }
 
+// ---------- MQTT Client Tool ----------
+function MqttClientTool() {
+  // Load saved state from localStorage
+  const loadState = <T,>(key: string, defaultValue: T): T => {
+    try {
+      const saved = localStorage.getItem(`mqttClient_${key}`);
+      return saved ? JSON.parse(saved) : defaultValue;
+    } catch {
+      return defaultValue;
+    }
+  };
+
+  const [broker, setBroker] = useState(() => loadState("broker", "broker.hivemq.com"));
+  const [port, setPort] = useState(() => loadState("port", "1883"));
+  const [clientId, setClientId] = useState(() => loadState("clientId", ""));
+  const [username, setUsername] = useState(() => loadState("username", ""));
+  const [password, setPassword] = useState(() => loadState("password", ""));
+  const [useTLS, setUseTLS] = useState(() => loadState("useTLS", false));
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [connected, setConnected] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [logs, setLogs] = useState<string[]>([]);
+
+  // Publish fields
+  const [pubTopic, setPubTopic] = useState(() => loadState("pubTopic", "test/topic"));
+  const [pubMessage, setPubMessage] = useState(() => loadState("pubMessage", "Hello MQTT"));
+  const [pubQos, setPubQos] = useState<0 | 1 | 2>(() => loadState("pubQos", 0));
+  const [pubRetain, setPubRetain] = useState(() => loadState("pubRetain", false));
+
+  // Subscribe fields
+  const [subTopic, setSubTopic] = useState(() => loadState("subTopic", "test/#"));
+  const [subQos, setSubQos] = useState<0 | 1 | 2>(() => loadState("subQos", 0));
+  const [subscriptions, setSubscriptions] = useState<string[]>([]);
+  const [messages, setMessages] = useState<any[]>([]);
+
+  // Save state to localStorage
+  React.useEffect(() => localStorage.setItem("mqttClient_broker", JSON.stringify(broker)), [broker]);
+  React.useEffect(() => localStorage.setItem("mqttClient_port", JSON.stringify(port)), [port]);
+  React.useEffect(() => localStorage.setItem("mqttClient_clientId", JSON.stringify(clientId)), [clientId]);
+  React.useEffect(() => localStorage.setItem("mqttClient_username", JSON.stringify(username)), [username]);
+  React.useEffect(() => localStorage.setItem("mqttClient_password", JSON.stringify(password)), [password]);
+  React.useEffect(() => localStorage.setItem("mqttClient_useTLS", JSON.stringify(useTLS)), [useTLS]);
+  React.useEffect(() => localStorage.setItem("mqttClient_pubTopic", JSON.stringify(pubTopic)), [pubTopic]);
+  React.useEffect(() => localStorage.setItem("mqttClient_pubMessage", JSON.stringify(pubMessage)), [pubMessage]);
+  React.useEffect(() => localStorage.setItem("mqttClient_pubQos", JSON.stringify(pubQos)), [pubQos]);
+  React.useEffect(() => localStorage.setItem("mqttClient_pubRetain", JSON.stringify(pubRetain)), [pubRetain]);
+  React.useEffect(() => localStorage.setItem("mqttClient_subTopic", JSON.stringify(subTopic)), [subTopic]);
+  React.useEffect(() => localStorage.setItem("mqttClient_subQos", JSON.stringify(subQos)), [subQos]);
+
+  const addLog = (line: string) => setLogs((l) => [
+    `${new Date().toLocaleTimeString()} › ${line}`,
+    ...l,
+  ].slice(0, 400));
+
+  // Poll for messages when connected
+  React.useEffect(() => {
+    if (!connected || !sessionId) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/mqtt/status/${sessionId}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.subscriptions) {
+            setSubscriptions(data.subscriptions);
+          }
+          if (data.messages && data.messages.length > messages.length) {
+            // New messages received
+            const newMsgs = data.messages.slice(messages.length);
+            newMsgs.forEach((msg: any) => {
+              addLog(`📩 [${msg.topic}] ${msg.payload}`);
+            });
+            setMessages(data.messages);
+          }
+        } else if (res.status === 404) {
+          // Connection lost
+          setConnected(false);
+          setSessionId(null);
+          addLog(`❌ Connection lost`);
+        }
+      } catch (e) {
+        console.error('Poll error:', e);
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [connected, sessionId, messages.length]);
+
+  async function handleConnect() {
+    setLoading(true);
+    setLogs([]);
+
+    try {
+      const body = {
+        broker,
+        port: Number(port),
+        clientId: clientId.trim() || undefined,
+        username: username.trim() || undefined,
+        password: password.trim() || undefined,
+        useTLS,
+      };
+
+      addLog(`Connecting to ${useTLS ? 'mqtts' : 'mqtt'}://${broker}:${port}...`);
+      const res = await fetch("/api/mqtt/connect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      const json = await res.json();
+
+      if (!res.ok) {
+        addLog(`❌ Connection failed: ${json.error || res.statusText}`);
+      } else {
+        setSessionId(json.sessionId);
+        setConnected(true);
+        setSubscriptions([]);
+        setMessages([]);
+        addLog(`✓ Connected! Client ID: ${json.clientId}`);
+        addLog(`  Session ID: ${json.sessionId}`);
+      }
+    } catch (e: any) {
+      if (e.message?.includes('Failed to fetch')) {
+        addLog(`❌ Cannot connect to backend server. Is it running on port 8787?`);
+      } else {
+        addLog(`❌ Exception: ${e?.message || e}`);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleDisconnect() {
+    if (!sessionId) return;
+
+    setLoading(true);
+    try {
+      addLog(`Disconnecting...`);
+      const res = await fetch("/api/mqtt/disconnect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId }),
+      });
+
+      const json = await res.json();
+
+      if (res.ok) {
+        addLog(`✓ Disconnected`);
+      } else {
+        addLog(`❌ Disconnect error: ${json.error}`);
+      }
+    } catch (e: any) {
+      addLog(`❌ Exception: ${e?.message || e}`);
+    } finally {
+      setConnected(false);
+      setSessionId(null);
+      setLoading(false);
+    }
+  }
+
+  async function handlePublish() {
+    if (!sessionId) return;
+
+    setLoading(true);
+    try {
+      const body = {
+        sessionId,
+        topic: pubTopic,
+        message: pubMessage,
+        qos: pubQos,
+        retain: pubRetain,
+      };
+
+      const res = await fetch("/api/mqtt/publish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      const json = await res.json();
+
+      if (res.ok) {
+        addLog(`📤 Published to [${pubTopic}] QoS ${pubQos}${pubRetain ? ' (retained)' : ''}`);
+        addLog(`   Message: ${pubMessage}`);
+      } else {
+        addLog(`❌ Publish failed: ${json.error}`);
+      }
+    } catch (e: any) {
+      addLog(`❌ Exception: ${e?.message || e}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleSubscribe() {
+    if (!sessionId) return;
+
+    setLoading(true);
+    try {
+      const body = {
+        sessionId,
+        topic: subTopic,
+        qos: subQos,
+      };
+
+      const res = await fetch("/api/mqtt/subscribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      const json = await res.json();
+
+      if (res.ok) {
+        addLog(`✓ Subscribed to [${subTopic}] QoS ${subQos}`);
+        if (json.subscriptions) {
+          setSubscriptions(json.subscriptions);
+        }
+      } else {
+        addLog(`❌ Subscribe failed: ${json.error}`);
+      }
+    } catch (e: any) {
+      addLog(`❌ Exception: ${e?.message || e}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleUnsubscribe(topic: string) {
+    if (!sessionId) return;
+
+    setLoading(true);
+    try {
+      const body = {
+        sessionId,
+        topic,
+      };
+
+      const res = await fetch("/api/mqtt/unsubscribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      const json = await res.json();
+
+      if (res.ok) {
+        addLog(`✓ Unsubscribed from [${topic}]`);
+        if (json.subscriptions) {
+          setSubscriptions(json.subscriptions);
+        }
+      } else {
+        addLog(`❌ Unsubscribe failed: ${json.error}`);
+      }
+    } catch (e: any) {
+      addLog(`❌ Exception: ${e?.message || e}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Card
+      id="mqtt"
+      title="MQTT Client"
+      subtitle="Connect to MQTT brokers, publish messages, and subscribe to topics."
+    >
+      <div className="grid gap-6">
+        {/* Connection Section */}
+        <div className="grid gap-4">
+          <div className="text-sm font-medium text-neutral-300">Connection Settings</div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <Field label="Broker Host">
+              <Input
+                value={broker}
+                onChange={(e) => setBroker(e.target.value)}
+                placeholder="broker.hivemq.com"
+                disabled={connected}
+              />
+            </Field>
+            <Field label="Port">
+              <Input
+                value={port}
+                onChange={(e) => setPort(e.target.value)}
+                placeholder="1883"
+                disabled={connected}
+              />
+            </Field>
+            <Field label="Client ID (optional)">
+              <Input
+                value={clientId}
+                onChange={(e) => setClientId(e.target.value)}
+                placeholder="Auto-generated"
+                disabled={connected}
+              />
+            </Field>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <Field label="Username (optional)">
+              <Input
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder="Username"
+                disabled={connected}
+              />
+            </Field>
+            <Field label="Password (optional)">
+              <Input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Password"
+                disabled={connected}
+              />
+            </Field>
+            <div className="flex items-end">
+              <div className="flex items-center gap-2 pb-2">
+                <input
+                  id="mqtt-tls"
+                  type="checkbox"
+                  className="h-4 w-4 rounded border-neutral-700 bg-neutral-900"
+                  checked={useTLS}
+                  onChange={(e) => setUseTLS(e.target.checked)}
+                  disabled={connected}
+                />
+                <label htmlFor="mqtt-tls" className="text-sm text-neutral-300">
+                  Use TLS (port 8883)
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex gap-3">
+            {connected ? (
+              <button
+                onClick={handleDisconnect}
+                className="rounded-xl border border-orange-800 bg-orange-900/20 px-6 py-2 text-sm text-orange-300 hover:bg-orange-900/40"
+                disabled={loading}
+              >
+                Disconnect
+              </button>
+            ) : (
+              <Button onClick={handleConnect} disabled={loading}>
+                {loading ? 'Connecting...' : 'Connect'}
+              </Button>
+            )}
+            {connected && (
+              <div className="flex items-center gap-2 text-sm">
+                <div className="h-2 w-2 rounded-full bg-green-500 animate-pulse"></div>
+                <span className="text-green-400">Connected</span>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Publish Section */}
+        {connected && (
+          <div className="rounded-2xl border border-neutral-800 bg-neutral-950 p-6">
+            <div className="text-sm font-medium text-neutral-300 mb-4">Publish Message</div>
+            <div className="grid gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <Field label="Topic">
+                  <Input
+                    value={pubTopic}
+                    onChange={(e) => setPubTopic(e.target.value)}
+                    placeholder="test/topic"
+                  />
+                </Field>
+                <Field label="QoS">
+                  <select
+                    value={pubQos}
+                    onChange={(e) => setPubQos(Number(e.target.value) as 0 | 1 | 2)}
+                    className="w-full rounded-xl border border-neutral-800 bg-neutral-900/70 px-3 py-2 text-sm text-neutral-100 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
+                  >
+                    <option value={0}>0 - At most once</option>
+                    <option value={1}>1 - At least once</option>
+                    <option value={2}>2 - Exactly once</option>
+                  </select>
+                </Field>
+              </div>
+
+              <Field label="Message">
+                <Textarea
+                  value={pubMessage}
+                  onChange={(e) => setPubMessage(e.target.value)}
+                  placeholder="Message payload"
+                  className="min-h-[80px]"
+                />
+              </Field>
+
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <input
+                    id="mqtt-retain"
+                    type="checkbox"
+                    className="h-4 w-4 rounded border-neutral-700 bg-neutral-900"
+                    checked={pubRetain}
+                    onChange={(e) => setPubRetain(e.target.checked)}
+                  />
+                  <label htmlFor="mqtt-retain" className="text-sm text-neutral-300">
+                    Retain message
+                  </label>
+                </div>
+                <Button onClick={handlePublish} disabled={loading}>
+                  Publish
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Subscribe Section */}
+        {connected && (
+          <div className="rounded-2xl border border-neutral-800 bg-neutral-950 p-6">
+            <div className="text-sm font-medium text-neutral-300 mb-4">Subscribe to Topic</div>
+            <div className="grid gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <Field label="Topic (supports wildcards: +, #)">
+                  <Input
+                    value={subTopic}
+                    onChange={(e) => setSubTopic(e.target.value)}
+                    placeholder="test/# or sensor/+"
+                  />
+                </Field>
+                <Field label="QoS">
+                  <select
+                    value={subQos}
+                    onChange={(e) => setSubQos(Number(e.target.value) as 0 | 1 | 2)}
+                    className="w-full rounded-xl border border-neutral-800 bg-neutral-900/70 px-3 py-2 text-sm text-neutral-100 focus:outline-none focus:ring-2 focus:ring-blue-500/40"
+                  >
+                    <option value={0}>0 - At most once</option>
+                    <option value={1}>1 - At least once</option>
+                    <option value={2}>2 - Exactly once</option>
+                  </select>
+                </Field>
+              </div>
+
+              <div className="flex justify-end">
+                <Button onClick={handleSubscribe} disabled={loading}>
+                  Subscribe
+                </Button>
+              </div>
+
+              {subscriptions.length > 0 && (
+                <div>
+                  <div className="text-xs text-neutral-400 mb-2">Active Subscriptions:</div>
+                  <div className="flex flex-wrap gap-2">
+                    {subscriptions.map((sub) => (
+                      <div
+                        key={sub}
+                        className="flex items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-sm"
+                      >
+                        <span className="text-neutral-300">{sub}</span>
+                        <button
+                          onClick={() => handleUnsubscribe(sub)}
+                          className="text-neutral-500 hover:text-red-400 transition-colors"
+                          title="Unsubscribe"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Logs Section */}
+        <div className="rounded-2xl border border-neutral-800 bg-neutral-950 p-6">
+          <div className="mb-4 flex items-center justify-between">
+            <div>
+              <div className="text-base font-medium text-neutral-100">Communication Log</div>
+              <div className="text-xs text-neutral-500 mt-1">MQTT events and messages</div>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setLogs([])}
+                className="rounded-xl border border-neutral-800 bg-neutral-900 px-4 py-2 text-sm hover:bg-neutral-800"
+              >
+                Clear
+              </button>
+              <Copyable text={logs.slice().reverse().join("\n")} />
+            </div>
+          </div>
+          <div className="overflow-auto border border-neutral-800 rounded-xl bg-neutral-900/50 p-4" style={{ maxHeight: '500px', minHeight: '300px' }}>
+            {logs.length === 0 ? (
+              <div className="flex h-[280px] items-center justify-center text-sm text-neutral-500">
+                {connected ? 'Publish messages or subscribe to topics to see activity...' : 'Connect to a broker to start...'}
+              </div>
+            ) : (
+              <div className="space-y-1 font-mono text-xs leading-relaxed">
+                {logs.map((line, i) => (
+                  <div
+                    key={i}
+                    className={`${line.includes('❌') ? 'text-red-400' :
+                        line.includes('✓') || line.includes('📤') ? 'text-green-400' :
+                          line.includes('📩') ? 'text-blue-400' :
+                            'text-neutral-300'
+                      }`}
+                  >
+                    {line}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Tips Section */}
+        <div className="rounded-xl border border-neutral-800 bg-neutral-950 p-4 text-xs text-neutral-400">
+          <div className="text-neutral-300 mb-2 font-medium">MQTT Quick Tips</div>
+          <div className="grid md:grid-cols-2 gap-x-6 gap-y-2">
+            <div>• <strong>QoS 0:</strong> Fire and forget (fastest, no guarantee)</div>
+            <div>• <strong>QoS 1:</strong> At least once delivery (possible duplicates)</div>
+            <div>• <strong>QoS 2:</strong> Exactly once delivery (slowest, guaranteed)</div>
+            <div>• <strong>Wildcard #:</strong> Matches multiple topic levels (e.g., sensor/#)</div>
+            <div>• <strong>Wildcard +:</strong> Matches single topic level (e.g., sensor/+/temp)</div>
+            <div>• <strong>Retained messages:</strong> New subscribers receive last message</div>
+            <div>• Popular public brokers: broker.hivemq.com, test.mosquitto.org</div>
+            <div>• Default ports: 1883 (TCP), 8883 (TLS), 8083 (WebSocket)</div>
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 // ---------- FCM Sender Tool ----------
 function FcmSenderTool() {
   // Load saved state from localStorage
@@ -1974,6 +2507,9 @@ export default function App() {
           </Tab>
           <Tab label="UDP Client">
             <UdpClientTool />
+          </Tab>
+          <Tab label="MQTT Client">
+            <MqttClientTool />
           </Tab>
           <Tab label="API Tester">
             <ApiTesterTool />

@@ -4,6 +4,7 @@ import net from 'net';
 import dgram from 'dgram';
 import { GoogleAuth } from 'google-auth-library';
 import crypto from 'crypto';
+import mqtt from 'mqtt';
 
 const app = express();
 app.use(cors());
@@ -11,6 +12,7 @@ app.use(express.json({ limit: '1mb' }));
 
 // ---- Connection Pool for Persistent Connections ----
 const connectionPool = new Map(); // sessionId -> { socket, events, config, lastActivity, sseClients }
+const mqttConnectionPool = new Map(); // sessionId -> { client, events, messages, config, lastActivity, subscriptions }
 
 // SSE helper to send event to all connected clients for a session
 function broadcastToSSE(sessionId, event) {
@@ -31,9 +33,18 @@ function cleanupOldConnections() {
   const timeout = 5 * 60 * 1000; // 5 minutes
   for (const [sessionId, conn] of connectionPool.entries()) {
     if (now - conn.lastActivity > timeout) {
-      console.log(`Cleaning up stale connection: ${sessionId}`);
+      console.log(`Cleaning up stale TCP connection: ${sessionId}`);
       try { conn.socket.destroy(); } catch {}
       connectionPool.delete(sessionId);
+    }
+  }
+
+  // Cleanup MQTT connections
+  for (const [sessionId, conn] of mqttConnectionPool.entries()) {
+    if (now - conn.lastActivity > timeout) {
+      console.log(`Cleaning up stale MQTT connection: ${sessionId}`);
+      try { conn.client.end(true); } catch {}
+      mqttConnectionPool.delete(sessionId);
     }
   }
 }
@@ -633,6 +644,365 @@ app.post('/api/udp', async (req, res) => {
       events,
       results,
       ok: false
+    });
+  }
+});
+
+// ---- /api/mqtt/connect: Connect to MQTT broker ----
+app.post('/api/mqtt/connect', async (req, res) => {
+  const { broker, port = 1883, clientId, username, password, useTLS = false } = req.body || {};
+
+  if (!broker) {
+    return res.status(400).json({ error: 'broker is required' });
+  }
+
+  const sessionId = crypto.randomBytes(16).toString('hex');
+  const events = [];
+  const messages = [];
+  const subscriptions = new Set();
+
+  function addEvent(type, message, data = null) {
+    events.push({
+      timestamp: new Date().toISOString(),
+      type,
+      message,
+      ...(data && { data })
+    });
+  }
+
+  try {
+    const protocol = useTLS ? 'mqtts' : 'mqtt';
+    const brokerUrl = `${protocol}://${broker}:${port}`;
+
+    const options = {
+      clientId: clientId || `traqcare_${sessionId.substring(0, 8)}`,
+      clean: true,
+      connectTimeout: 10000,
+      reconnectPeriod: 0 // Disable auto-reconnect
+    };
+
+    if (username) {
+      options.username = username;
+      if (password) {
+        options.password = password;
+      }
+    }
+
+    addEvent('connecting', `Connecting to ${brokerUrl}...`);
+
+    const client = mqtt.connect(brokerUrl, options);
+
+    // Set up event handlers
+    client.on('connect', () => {
+      addEvent('connect', `Connected to ${brokerUrl}`, { clientId: options.clientId });
+
+      mqttConnectionPool.set(sessionId, {
+        client,
+        events,
+        messages,
+        subscriptions,
+        config: { broker, port, clientId: options.clientId, useTLS },
+        lastActivity: Date.now()
+      });
+
+      res.json({
+        ok: true,
+        sessionId,
+        clientId: options.clientId,
+        message: `Connected to ${brokerUrl}`,
+        events
+      });
+    });
+
+    client.on('error', (err) => {
+      addEvent('error', err.message);
+
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: err.message,
+          events
+        });
+      }
+
+      try { client.end(true); } catch {}
+      mqttConnectionPool.delete(sessionId);
+    });
+
+    client.on('message', (topic, payload) => {
+      const messageData = {
+        timestamp: new Date().toISOString(),
+        topic,
+        payload: payload.toString(),
+        payloadHex: payload.toString('hex'),
+        length: payload.length
+      };
+
+      messages.push(messageData);
+      addEvent('message', `Received message on topic: ${topic}`, messageData);
+    });
+
+    client.on('close', () => {
+      addEvent('close', 'Connection closed');
+      mqttConnectionPool.delete(sessionId);
+    });
+
+    // Connection timeout
+    setTimeout(() => {
+      if (!mqttConnectionPool.has(sessionId) && !res.headersSent) {
+        addEvent('timeout', 'Connection timeout');
+        res.status(500).json({
+          error: 'Connection timeout',
+          events
+        });
+        try { client.end(true); } catch {}
+      }
+    }, 10000);
+
+  } catch (err) {
+    addEvent('error', err.message);
+    res.status(500).json({
+      error: err.message,
+      events
+    });
+  }
+});
+
+// ---- /api/mqtt/publish: Publish message to MQTT topic ----
+app.post('/api/mqtt/publish', async (req, res) => {
+  const { sessionId, topic, message, qos = 0, retain = false } = req.body || {};
+
+  if (!sessionId || !topic || message === undefined) {
+    return res.status(400).json({ error: 'sessionId, topic, and message are required' });
+  }
+
+  const conn = mqttConnectionPool.get(sessionId);
+  if (!conn) {
+    return res.status(404).json({ error: 'MQTT connection not found. It may have timed out or been closed.' });
+  }
+
+  conn.lastActivity = Date.now();
+
+  function addEvent(type, msg, data = null) {
+    conn.events.push({
+      timestamp: new Date().toISOString(),
+      type,
+      message: msg,
+      ...(data && { data })
+    });
+  }
+
+  try {
+    await new Promise((resolve, reject) => {
+      conn.client.publish(topic, message, { qos, retain }, (err) => {
+        if (err) {
+          addEvent('error', `Failed to publish: ${err.message}`);
+          reject(err);
+        } else {
+          addEvent('publish', `Published to topic: ${topic}`, {
+            topic,
+            message,
+            qos,
+            retain,
+            length: Buffer.from(message).length
+          });
+          resolve();
+        }
+      });
+    });
+
+    res.json({
+      ok: true,
+      topic,
+      message,
+      qos,
+      retain,
+      events: conn.events.slice(-10)
+    });
+
+  } catch (err) {
+    res.status(500).json({
+      error: err.message,
+      events: conn.events.slice(-10)
+    });
+  }
+});
+
+// ---- /api/mqtt/subscribe: Subscribe to MQTT topic ----
+app.post('/api/mqtt/subscribe', async (req, res) => {
+  const { sessionId, topic, qos = 0 } = req.body || {};
+
+  if (!sessionId || !topic) {
+    return res.status(400).json({ error: 'sessionId and topic are required' });
+  }
+
+  const conn = mqttConnectionPool.get(sessionId);
+  if (!conn) {
+    return res.status(404).json({ error: 'MQTT connection not found. It may have timed out or been closed.' });
+  }
+
+  conn.lastActivity = Date.now();
+
+  function addEvent(type, msg, data = null) {
+    conn.events.push({
+      timestamp: new Date().toISOString(),
+      type,
+      message: msg,
+      ...(data && { data })
+    });
+  }
+
+  try {
+    await new Promise((resolve, reject) => {
+      conn.client.subscribe(topic, { qos }, (err, granted) => {
+        if (err) {
+          addEvent('error', `Failed to subscribe: ${err.message}`);
+          reject(err);
+        } else {
+          conn.subscriptions.add(topic);
+          addEvent('subscribe', `Subscribed to topic: ${topic}`, { topic, qos, granted });
+          resolve(granted);
+        }
+      });
+    });
+
+    res.json({
+      ok: true,
+      topic,
+      qos,
+      subscriptions: Array.from(conn.subscriptions),
+      events: conn.events.slice(-10)
+    });
+
+  } catch (err) {
+    res.status(500).json({
+      error: err.message,
+      events: conn.events.slice(-10)
+    });
+  }
+});
+
+// ---- /api/mqtt/unsubscribe: Unsubscribe from MQTT topic ----
+app.post('/api/mqtt/unsubscribe', async (req, res) => {
+  const { sessionId, topic } = req.body || {};
+
+  if (!sessionId || !topic) {
+    return res.status(400).json({ error: 'sessionId and topic are required' });
+  }
+
+  const conn = mqttConnectionPool.get(sessionId);
+  if (!conn) {
+    return res.status(404).json({ error: 'MQTT connection not found. It may have timed out or been closed.' });
+  }
+
+  conn.lastActivity = Date.now();
+
+  function addEvent(type, msg, data = null) {
+    conn.events.push({
+      timestamp: new Date().toISOString(),
+      type,
+      message: msg,
+      ...(data && { data })
+    });
+  }
+
+  try {
+    await new Promise((resolve, reject) => {
+      conn.client.unsubscribe(topic, (err) => {
+        if (err) {
+          addEvent('error', `Failed to unsubscribe: ${err.message}`);
+          reject(err);
+        } else {
+          conn.subscriptions.delete(topic);
+          addEvent('unsubscribe', `Unsubscribed from topic: ${topic}`, { topic });
+          resolve();
+        }
+      });
+    });
+
+    res.json({
+      ok: true,
+      topic,
+      subscriptions: Array.from(conn.subscriptions),
+      events: conn.events.slice(-10)
+    });
+
+  } catch (err) {
+    res.status(500).json({
+      error: err.message,
+      events: conn.events.slice(-10)
+    });
+  }
+});
+
+// ---- /api/mqtt/status: Get MQTT connection status and messages ----
+app.get('/api/mqtt/status/:sessionId', (req, res) => {
+  const { sessionId } = req.params;
+  const conn = mqttConnectionPool.get(sessionId);
+
+  if (!conn) {
+    return res.status(404).json({ error: 'MQTT connection not found' });
+  }
+
+  conn.lastActivity = Date.now();
+
+  res.json({
+    ok: true,
+    sessionId,
+    connected: conn.client.connected,
+    config: conn.config,
+    subscriptions: Array.from(conn.subscriptions),
+    events: conn.events.slice(-20),
+    messages: conn.messages.slice(-20),
+    totalMessages: conn.messages.length,
+    lastActivity: conn.lastActivity
+  });
+});
+
+// ---- /api/mqtt/disconnect: Disconnect from MQTT broker ----
+app.post('/api/mqtt/disconnect', (req, res) => {
+  const { sessionId } = req.body || {};
+
+  if (!sessionId) {
+    return res.status(400).json({ error: 'sessionId is required' });
+  }
+
+  const conn = mqttConnectionPool.get(sessionId);
+  if (!conn) {
+    return res.status(404).json({ error: 'MQTT connection not found' });
+  }
+
+  function addEvent(type, msg, data = null) {
+    conn.events.push({
+      timestamp: new Date().toISOString(),
+      type,
+      message: msg,
+      ...(data && { data })
+    });
+  }
+
+  try {
+    addEvent('disconnecting', 'Disconnecting from broker...');
+    conn.client.end(false, {}, () => {
+      addEvent('disconnect', 'Disconnected from broker');
+    });
+
+    mqttConnectionPool.delete(sessionId);
+
+    res.json({
+      ok: true,
+      message: 'Disconnected from MQTT broker',
+      events: conn.events,
+      totalMessages: conn.messages.length
+    });
+
+  } catch (err) {
+    addEvent('error', `Disconnect error: ${err.message}`);
+    try { conn.client.end(true); } catch {}
+    mqttConnectionPool.delete(sessionId);
+
+    res.status(500).json({
+      error: err.message,
+      events: conn.events
     });
   }
 });
