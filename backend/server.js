@@ -36,6 +36,8 @@ function broadcastToSSE(sessionId, event) {
 function cleanupOldConnections() {
   const now = Date.now();
   const timeout = 5 * 60 * 1000; // 5 minutes
+
+  // Cleanup TCP connections
   for (const [sessionId, conn] of connectionPool.entries()) {
     if (now - conn.lastActivity > timeout) {
       console.log(`Cleaning up stale TCP connection: ${sessionId}`);
@@ -50,6 +52,25 @@ function cleanupOldConnections() {
       console.log(`Cleaning up stale MQTT connection: ${sessionId}`);
       try { conn.client.end(true); } catch {}
       mqttConnectionPool.delete(sessionId);
+    }
+  }
+
+  // Cleanup TCP Bridge servers
+  const bridgeTimeout = 60 * 60 * 1000; // 1 hour timeout for bridges
+  for (const [bridgeId, bridge] of bridgeServers.entries()) {
+    if (now - bridge.lastActivity > bridgeTimeout) {
+      console.log(`Cleaning up stale TCP bridge: ${bridgeId}`);
+      try {
+        bridge.clients.forEach((client) => {
+          try { client.socket.destroy(); } catch {}
+          try { client.primaryConnection.destroy(); } catch {}
+          client.secondaryConnections.forEach(conn => {
+            try { conn.destroy(); } catch {}
+          });
+        });
+        bridge.server.close();
+      } catch {}
+      bridgeServers.delete(bridgeId);
     }
   }
 }
@@ -1171,6 +1192,432 @@ app.post('/api/fcm', async (req, res) => {
     res.status(resp.status).type('application/json').send(text);
   } catch (e) {
     res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+// ---- TCP Bridge Server ----
+const bridgeServers = new Map(); // bridgeId -> { server, port, config, clients, logs, lastActivity }
+
+// Start TCP Bridge Server
+app.post('/api/tcp-bridge/start', async (req, res) => {
+  const { listenPort, primaryServer, secondaryServers = [] } = req.body || {};
+
+  if (!listenPort || !primaryServer?.ip || !primaryServer?.port) {
+    return res.status(400).json({ error: 'listenPort, primaryServer.ip, and primaryServer.port are required' });
+  }
+
+  // ---- Loop Protection: Prevent bridge from connecting to itself ----
+  const isLocalhost = (ip) => {
+    return ip === 'localhost' ||
+           ip === '127.0.0.1' ||
+           ip === '::1' ||
+           ip === '0.0.0.0' ||
+           ip === '::';
+  };
+
+  // Check if primary server would create a loop
+  if (isLocalhost(primaryServer.ip) && Number(primaryServer.port) === Number(listenPort)) {
+    return res.status(400).json({
+      error: `Loop detected: Primary server cannot be ${primaryServer.ip}:${primaryServer.port} when bridge listens on port ${listenPort}. The bridge would connect to itself causing an infinite loop.`
+    });
+  }
+
+  // Check if any secondary server would create a loop
+  for (let i = 0; i < secondaryServers.length; i++) {
+    const server = secondaryServers[i];
+    if (server.ip && server.port) {
+      if (isLocalhost(server.ip) && Number(server.port) === Number(listenPort)) {
+        return res.status(400).json({
+          error: `Loop detected: Secondary server ${i + 1} cannot be ${server.ip}:${server.port} when bridge listens on port ${listenPort}. The bridge would connect to itself causing an infinite loop.`
+        });
+      }
+    }
+  }
+
+  // Check for duplicate servers (same IP:Port in primary and secondary, or between secondaries)
+  const allServers = [
+    { ...primaryServer, type: 'primary' },
+    ...secondaryServers.map((s, idx) => ({ ...s, type: `secondary-${idx + 1}` }))
+  ];
+
+  const serverMap = new Map();
+  for (const server of allServers) {
+    if (server.ip && server.port) {
+      const key = `${server.ip}:${server.port}`;
+      if (serverMap.has(key)) {
+        return res.status(400).json({
+          error: `Duplicate server detected: ${server.type} and ${serverMap.get(key)} both point to ${key}. Each server must have a unique IP:Port combination.`
+        });
+      }
+      serverMap.set(key, server.type);
+    }
+  }
+
+  const bridgeId = crypto.randomBytes(16).toString('hex');
+  const logs = [];
+  const clients = new Map(); // clientId -> { socket, remoteAddress, remotePort, primaryConnection, secondaryConnections }
+
+  function addLog(type, message, data = null) {
+    const logEntry = {
+      timestamp: new Date().toISOString(),
+      type,
+      message,
+      ...(data && { data })
+    };
+    logs.push(logEntry);
+
+    // Keep only last 1000 logs to prevent memory issues
+    if (logs.length > 1000) {
+      logs.shift();
+    }
+  }
+
+  try {
+    const server = net.createServer((clientSocket) => {
+      const clientId = crypto.randomBytes(8).toString('hex');
+      const clientInfo = `${clientSocket.remoteAddress}:${clientSocket.remotePort}`;
+
+      addLog('client_connected', `Client connected: ${clientInfo}`, { clientId, clientInfo });
+
+      // Connect to primary server
+      const primaryConn = new net.Socket();
+      primaryConn.connect(primaryServer.port, primaryServer.ip, () => {
+        addLog('primary_connected', `Connected to primary server ${primaryServer.ip}:${primaryServer.port}`, { clientId });
+      });
+
+      // Connect to secondary servers
+      const secondaryConns = secondaryServers.map((server, idx) => {
+        const conn = new net.Socket();
+        const serverInfo = `${server.ip}:${server.port}`;
+
+        conn.connect(server.port, server.ip, () => {
+          addLog('secondary_connected', `[Secondary ${idx + 1}] Connected to ${serverInfo}`, {
+            clientId,
+            serverIndex: idx,
+            serverInfo
+          });
+        });
+
+        // Log data received from secondary servers
+        conn.on('data', (data) => {
+          const hex = data.toString('hex');
+          const ascii = data.toString('ascii').replace(/[^\x20-\x7E]/g, '.');
+
+          addLog('secondary_data', `[Secondary ${idx + 1} ➜ Bridge] Received ${data.length} bytes from ${serverInfo} (NOT forwarded to client)`, {
+            clientId,
+            direction: 'secondary_to_bridge',
+            serverIndex: idx,
+            serverInfo,
+            hex,
+            ascii,
+            length: data.length,
+            forwardedToClient: false
+          });
+        });
+
+        conn.on('error', (err) => {
+          addLog('secondary_error', `[Secondary ${idx + 1}] Error from ${serverInfo}: ${err.message}`, {
+            clientId,
+            serverIndex: idx,
+            serverInfo
+          });
+        });
+
+        conn.on('close', () => {
+          addLog('secondary_closed', `[Secondary ${idx + 1}] Connection closed to ${serverInfo}`, {
+            clientId,
+            serverIndex: idx,
+            serverInfo
+          });
+        });
+
+        return conn;
+      });
+
+      // Store client connection info
+      clients.set(clientId, {
+        socket: clientSocket,
+        remoteAddress: clientSocket.remoteAddress,
+        remotePort: clientSocket.remotePort,
+        primaryConnection: primaryConn,
+        secondaryConnections: secondaryConns,
+        connectedAt: new Date().toISOString()
+      });
+
+      // Forward data from client to all servers
+      clientSocket.on('data', (data) => {
+        const hex = data.toString('hex');
+        const ascii = data.toString('ascii').replace(/[^\x20-\x7E]/g, '.');
+
+        addLog('client_data', `[Client ➜ Bridge] Received ${data.length} bytes from ${clientInfo}`, {
+          clientId,
+          clientInfo,
+          direction: 'client_to_bridge',
+          hex,
+          ascii,
+          length: data.length
+        });
+
+        // Send to primary server
+        try {
+          primaryConn.write(data);
+          addLog('forward_primary', `[Bridge ➜ Primary] Forwarded ${data.length} bytes to ${primaryServer.ip}:${primaryServer.port}`, {
+            clientId,
+            direction: 'bridge_to_primary',
+            serverInfo: `${primaryServer.ip}:${primaryServer.port}`,
+            hex,
+            ascii,
+            length: data.length
+          });
+        } catch (err) {
+          addLog('forward_primary_error', `[Bridge ✖ Primary] Failed to forward: ${err.message}`, {
+            clientId,
+            direction: 'bridge_to_primary',
+            error: err.message
+          });
+        }
+
+        // Send to secondary servers
+        secondaryConns.forEach((conn, idx) => {
+          try {
+            conn.write(data);
+            const serverInfo = `${secondaryServers[idx].ip}:${secondaryServers[idx].port}`;
+            addLog('forward_secondary', `[Bridge ➜ Secondary ${idx + 1}] Forwarded ${data.length} bytes to ${serverInfo}`, {
+              clientId,
+              direction: 'bridge_to_secondary',
+              serverIndex: idx,
+              serverInfo,
+              hex,
+              ascii,
+              length: data.length
+            });
+          } catch (err) {
+            addLog('forward_secondary_error', `[Bridge ✖ Secondary ${idx + 1}] Failed: ${err.message}`, {
+              clientId,
+              direction: 'bridge_to_secondary',
+              serverIndex: idx,
+              error: err.message
+            });
+          }
+        });
+      });
+
+      // Forward data from primary server back to client
+      primaryConn.on('data', (data) => {
+        const hex = data.toString('hex');
+        const ascii = data.toString('ascii').replace(/[^\x20-\x7E]/g, '.');
+
+        addLog('primary_data', `[Primary ➜ Bridge] Received ${data.length} bytes from ${primaryServer.ip}:${primaryServer.port}`, {
+          clientId,
+          direction: 'primary_to_bridge',
+          serverInfo: `${primaryServer.ip}:${primaryServer.port}`,
+          hex,
+          ascii,
+          length: data.length
+        });
+
+        try {
+          clientSocket.write(data);
+          addLog('forward_client', `[Bridge ➜ Client] Forwarded ${data.length} bytes to ${clientInfo}`, {
+            clientId,
+            clientInfo,
+            direction: 'bridge_to_client',
+            hex,
+            ascii,
+            length: data.length
+          });
+        } catch (err) {
+          addLog('forward_client_error', `[Bridge ✖ Client] Failed to forward: ${err.message}`, {
+            clientId,
+            clientInfo,
+            direction: 'bridge_to_client',
+            error: err.message
+          });
+        }
+      });
+
+      // Handle client disconnect
+      clientSocket.on('close', () => {
+        addLog('client_disconnected', `Client disconnected: ${clientInfo}`, { clientId });
+
+        try { primaryConn.end(); } catch {}
+        secondaryConns.forEach(conn => {
+          try { conn.end(); } catch {}
+        });
+
+        clients.delete(clientId);
+      });
+
+      clientSocket.on('error', (err) => {
+        addLog('client_error', `Client error: ${err.message}`, { clientId, clientInfo });
+      });
+
+      // Handle primary server errors
+      primaryConn.on('error', (err) => {
+        addLog('primary_error', `Primary server error: ${err.message}`, { clientId });
+        try { clientSocket.end(); } catch {}
+      });
+
+      primaryConn.on('close', () => {
+        addLog('primary_closed', `Primary server connection closed`, { clientId });
+        try { clientSocket.end(); } catch {}
+      });
+    });
+
+    server.listen(listenPort, () => {
+      addLog('bridge_started', `TCP Bridge listening on port ${listenPort}`);
+
+      bridgeServers.set(bridgeId, {
+        server,
+        port: listenPort,
+        config: {
+          listenPort,
+          primaryServer,
+          secondaryServers
+        },
+        clients,
+        logs,
+        lastActivity: Date.now(),
+        startedAt: new Date().toISOString()
+      });
+
+      res.json({
+        ok: true,
+        bridgeId,
+        message: `TCP Bridge started on port ${listenPort}`,
+        config: {
+          listenPort,
+          primaryServer,
+          secondaryServers
+        }
+      });
+    });
+
+    server.on('error', (err) => {
+      addLog('bridge_error', `Bridge server error: ${err.message}`);
+      res.status(500).json({ error: err.message });
+    });
+
+  } catch (err) {
+    addLog('bridge_start_error', `Failed to start bridge: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get TCP Bridge Status
+app.get('/api/tcp-bridge/status/:bridgeId', (req, res) => {
+  const { bridgeId } = req.params;
+  const bridge = bridgeServers.get(bridgeId);
+
+  if (!bridge) {
+    return res.status(404).json({ error: 'Bridge not found' });
+  }
+
+  bridge.lastActivity = Date.now();
+
+  const clientsInfo = Array.from(bridge.clients.entries()).map(([id, client]) => ({
+    clientId: id,
+    remoteAddress: client.remoteAddress,
+    remotePort: client.remotePort,
+    connectedAt: client.connectedAt
+  }));
+
+  res.json({
+    ok: true,
+    bridgeId,
+    running: bridge.server.listening,
+    config: bridge.config,
+    clients: clientsInfo,
+    totalClients: clientsInfo.length,
+    logs: bridge.logs.slice(-100), // Last 100 logs
+    totalLogs: bridge.logs.length,
+    startedAt: bridge.startedAt
+  });
+});
+
+// Get TCP Bridge Logs
+app.get('/api/tcp-bridge/logs/:bridgeId', (req, res) => {
+  const { bridgeId } = req.params;
+  const bridge = bridgeServers.get(bridgeId);
+
+  if (!bridge) {
+    return res.status(404).json({ error: 'Bridge not found' });
+  }
+
+  bridge.lastActivity = Date.now();
+
+  res.json({
+    ok: true,
+    bridgeId,
+    logs: bridge.logs,
+    totalLogs: bridge.logs.length
+  });
+});
+
+// Clear TCP Bridge Logs
+app.post('/api/tcp-bridge/clear-logs', (req, res) => {
+  const { bridgeId } = req.body || {};
+
+  if (!bridgeId) {
+    return res.status(400).json({ error: 'bridgeId is required' });
+  }
+
+  const bridge = bridgeServers.get(bridgeId);
+  if (!bridge) {
+    return res.status(404).json({ error: 'Bridge not found' });
+  }
+
+  bridge.logs.length = 0;
+  bridge.lastActivity = Date.now();
+
+  res.json({
+    ok: true,
+    message: 'Logs cleared'
+  });
+});
+
+// Stop TCP Bridge Server
+app.post('/api/tcp-bridge/stop', (req, res) => {
+  const { bridgeId } = req.body || {};
+
+  if (!bridgeId) {
+    return res.status(400).json({ error: 'bridgeId is required' });
+  }
+
+  const bridge = bridgeServers.get(bridgeId);
+  if (!bridge) {
+    return res.status(404).json({ error: 'Bridge not found' });
+  }
+
+  try {
+    // Close all client connections
+    bridge.clients.forEach((client) => {
+      try { client.socket.end(); } catch {}
+      try { client.primaryConnection.end(); } catch {}
+      client.secondaryConnections.forEach(conn => {
+        try { conn.end(); } catch {}
+      });
+    });
+
+    // Close the bridge server
+    bridge.server.close(() => {
+      bridge.logs.push({
+        timestamp: new Date().toISOString(),
+        type: 'bridge_stopped',
+        message: `TCP Bridge stopped`
+      });
+    });
+
+    bridgeServers.delete(bridgeId);
+
+    res.json({
+      ok: true,
+      message: 'TCP Bridge stopped',
+      logs: bridge.logs
+    });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

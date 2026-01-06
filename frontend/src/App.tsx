@@ -1,7 +1,17 @@
 import React, { useMemo, useState } from 'react'
 import iconLogo from './icon.png'
 
-function Header() {
+function Header({ activeTab, setActiveTab }: { activeTab: number; setActiveTab: (index: number) => void }) {
+  const tabs = [
+    { name: 'TCP', index: 0 },
+    { name: 'UDP', index: 1 },
+    { name: 'MQTT', index: 2 },
+    { name: 'API', index: 3 },
+    { name: 'FCM', index: 4 },
+    { name: 'Bridge', index: 5 },
+    { name: 'About', index: 6 },
+  ]
+
   return (
     <header className="sticky top-0 z-40 border-b border-neutral-800/60 bg-neutral-950/80 backdrop-blur supports-[backdrop-filter]:bg-neutral-950/60">
       <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4">
@@ -11,17 +21,19 @@ function Header() {
           <span className="ml-2 rounded-full border border-neutral-800 px-2 py-0.5 text-xs text-neutral-400">Modern Utilities</span>
         </div>
         <nav className="text-sm text-neutral-400">
-          <a href="#tcp" className="hover:text-neutral-200">TCP</a>
-          <span className="mx-3 opacity-40">•</span>
-          <a href="#udp" className="hover:text-neutral-200">UDP</a>
-          <span className="mx-3 opacity-40">•</span>
-          <a href="#mqtt" className="hover:text-neutral-200">MQTT</a>
-          <span className="mx-3 opacity-40">•</span>
-          <a href="#api" className="hover:text-neutral-200">API</a>
-          <span className="mx-3 opacity-40">•</span>
-          <a href="#fcm" className="hover:text-neutral-200">FCM</a>
-          <span className="mx-3 opacity-40">•</span>
-          <a href="#about" className="hover:text-neutral-200">About</a>
+          {tabs.map((tab, idx) => (
+            <React.Fragment key={tab.index}>
+              {idx > 0 && <span className="mx-3 opacity-40">•</span>}
+              <button
+                onClick={() => setActiveTab(tab.index)}
+                className={`hover:text-neutral-200 cursor-pointer transition-colors ${
+                  activeTab === tab.index ? 'text-blue-400 font-medium' : ''
+                }`}
+              >
+                {tab.name}
+              </button>
+            </React.Fragment>
+          ))}
         </nav>
       </div>
     </header>
@@ -55,8 +67,19 @@ function Hero() {
 function Footer() {
   return (
     <footer className="border-t border-neutral-800/60 py-10 text-center text-sm text-neutral-500">
-      <div className="mx-auto max-w-6xl px-4">
-        © {new Date().getFullYear()} TraqCare Tools — Built for quick testing. Do not paste secrets client-side.
+      <div className="mx-auto max-w-6xl px-4 space-y-2">
+        <div>
+          © {new Date().getFullYear()} TraqCare Tools — Built for quick testing. Do not paste secrets client-side.
+        </div>
+        <div className="text-xs text-neutral-600">
+          Developed by Huizhou Skywonder Technology Co., Ltd (<a href="https://skywondergps.com" target="_blank" rel="noopener noreferrer" className="text-neutral-500 hover:text-neutral-400 underline">Asyncronic</a>)
+        </div>
+        <div className="text-xs text-neutral-600">
+          Support: <a href="mailto:traqcare@gmail.com" className="text-neutral-500 hover:text-neutral-400 underline">traqcare@gmail.com</a>
+        </div>
+        <div className="text-xs text-neutral-600">
+          Open source under <a href="https://github.com/asyncronic/traqcare-tools/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" className="text-neutral-500 hover:text-neutral-400 underline">MIT License</a>
+        </div>
       </div>
     </footer>
   )
@@ -139,8 +162,7 @@ function Button({ children, loading, ...props }: { children: React.ReactNode; lo
   )
 }
 
-function Tabs({ children }: { children: React.ReactNode }) {
-  const [active, setActive] = useState(0);
+function Tabs({ children, activeTab, setActiveTab }: { children: React.ReactNode; activeTab: number; setActiveTab: (index: number) => void }) {
   const items = React.Children.toArray(children) as React.ReactElement[];
   return (
     <div className="mt-10">
@@ -148,10 +170,10 @@ function Tabs({ children }: { children: React.ReactNode }) {
         {items.map((item: any, i) => (
           <button
             key={i}
-            onClick={() => setActive(i)}
+            onClick={() => setActiveTab(i)}
             className={[
               "rounded-full border px-4 py-2 text-sm",
-              active === i
+              activeTab === i
                 ? "border-blue-600 bg-blue-600/10 text-blue-300"
                 : "border-neutral-800 bg-neutral-900 text-neutral-300 hover:bg-neutral-800/60",
             ].join(" ")}
@@ -160,7 +182,13 @@ function Tabs({ children }: { children: React.ReactNode }) {
           </button>
         ))}
       </div>
-      <div className="mt-6">{items[active]}</div>
+      <div className="mt-6">
+        {items.map((item, i) => (
+          <div key={i} style={{ display: activeTab === i ? 'block' : 'none' }}>
+            {item}
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
@@ -2406,6 +2434,475 @@ function ApiTesterTool() {
   );
 }
 
+// ---------- TCP Bridge Tool ----------
+function TcpBridgeTool() {
+  const [listenPort, setListenPort] = useState(() => localStorage.getItem('bridge_listen_port') || '9904');
+  const [primaryIp, setPrimaryIp] = useState(() => localStorage.getItem('bridge_primary_ip') || '');
+  const [primaryPort, setPrimaryPort] = useState(() => localStorage.getItem('bridge_primary_port') || '');
+  const [secondaryServers, setSecondaryServers] = useState<Array<{ ip: string; port: string }>>(() => {
+    const saved = localStorage.getItem('bridge_secondary_servers');
+    return saved ? JSON.parse(saved) : [];
+  });
+  const [bridgeId, setBridgeId] = useState<string | null>(null);
+  const [isRunning, setIsRunning] = useState(false);
+  const [logs, setLogs] = useState<any[]>([]);
+  const [clients, setClients] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [pollInterval, setPollInterval] = useState<number | null>(null);
+
+  // Save to localStorage
+  React.useEffect(() => {
+    localStorage.setItem('bridge_listen_port', listenPort);
+    localStorage.setItem('bridge_primary_ip', primaryIp);
+    localStorage.setItem('bridge_primary_port', primaryPort);
+    localStorage.setItem('bridge_secondary_servers', JSON.stringify(secondaryServers));
+  }, [listenPort, primaryIp, primaryPort, secondaryServers]);
+
+  const addSecondaryServer = () => {
+    setSecondaryServers([...secondaryServers, { ip: '', port: '' }]);
+  };
+
+  const removeSecondaryServer = (index: number) => {
+    setSecondaryServers(secondaryServers.filter((_, i) => i !== index));
+  };
+
+  const updateSecondaryServer = (index: number, field: 'ip' | 'port', value: string) => {
+    const updated = [...secondaryServers];
+    updated[index][field] = value;
+    setSecondaryServers(updated);
+  };
+
+  const startBridge = async () => {
+    if (!listenPort || !primaryIp || !primaryPort) {
+      alert('Please fill in Listen Port, Primary IP, and Primary Port');
+      return;
+    }
+
+    // ---- Loop Protection Validation ----
+    const isLocalhost = (ip: string) => {
+      return ip === 'localhost' ||
+             ip === '127.0.0.1' ||
+             ip === '::1' ||
+             ip === '0.0.0.0' ||
+             ip === '::';
+    };
+
+    // Check if primary server would create a loop
+    if (isLocalhost(primaryIp) && Number(primaryPort) === Number(listenPort)) {
+      alert(`❌ Loop Detected!\n\nPrimary server cannot be ${primaryIp}:${primaryPort} when bridge listens on port ${listenPort}.\n\nThe bridge would connect to itself causing an infinite loop.`);
+      return;
+    }
+
+    // Check if any secondary server would create a loop
+    for (let i = 0; i < secondaryServers.length; i++) {
+      const server = secondaryServers[i];
+      if (server.ip && server.port) {
+        if (isLocalhost(server.ip) && Number(server.port) === Number(listenPort)) {
+          alert(`❌ Loop Detected!\n\nSecondary server ${i + 1} cannot be ${server.ip}:${server.port} when bridge listens on port ${listenPort}.\n\nThe bridge would connect to itself causing an infinite loop.`);
+          return;
+        }
+      }
+    }
+
+    // Check for duplicate servers
+    const allServers = [
+      { ip: primaryIp, port: primaryPort, type: 'Primary' },
+      ...secondaryServers
+        .filter(s => s.ip && s.port)
+        .map((s, idx) => ({ ip: s.ip, port: s.port, type: `Secondary ${idx + 1}` }))
+    ];
+
+    const serverMap = new Map();
+    for (const server of allServers) {
+      const key = `${server.ip}:${server.port}`;
+      if (serverMap.has(key)) {
+        alert(`❌ Duplicate Server Detected!\n\n${server.type} and ${serverMap.get(key)} both point to ${key}.\n\nEach server must have a unique IP:Port combination.`);
+        return;
+      }
+      serverMap.set(key, server.type);
+    }
+
+    setLoading(true);
+    try {
+      const response = await fetch('/api/tcp-bridge/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          listenPort: Number(listenPort),
+          primaryServer: { ip: primaryIp, port: Number(primaryPort) },
+          secondaryServers: secondaryServers
+            .filter(s => s.ip && s.port)
+            .map(s => ({ ip: s.ip, port: Number(s.port) }))
+        })
+      });
+
+      const data = await response.json();
+      if (data.ok) {
+        setBridgeId(data.bridgeId);
+        setIsRunning(true);
+        setLogs([{ timestamp: new Date().toISOString(), type: 'info', message: data.message }]);
+
+        // Start polling for status
+        const interval = setInterval(() => pollStatus(data.bridgeId), 2000);
+        setPollInterval(interval);
+      } else {
+        alert(`Error: ${data.error}`);
+      }
+    } catch (err: any) {
+      alert(`Failed to start bridge: ${err.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const stopBridge = async () => {
+    if (!bridgeId) return;
+
+    setLoading(true);
+    try {
+      const response = await fetch('/api/tcp-bridge/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bridgeId })
+      });
+
+      const data = await response.json();
+      if (data.ok) {
+        setIsRunning(false);
+        setBridgeId(null);
+        setLogs(prev => [...prev, { timestamp: new Date().toISOString(), type: 'info', message: 'Bridge stopped' }]);
+
+        if (pollInterval) {
+          clearInterval(pollInterval);
+          setPollInterval(null);
+        }
+      }
+    } catch (err: any) {
+      alert(`Failed to stop bridge: ${err.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const pollStatus = async (id: string) => {
+    try {
+      const response = await fetch(`/api/tcp-bridge/status/${id}`);
+      const data = await response.json();
+
+      if (data.ok) {
+        setClients(data.clients);
+        setLogs(data.logs);
+      }
+    } catch (err) {
+      console.error('Poll error:', err);
+    }
+  };
+
+  const clearLogs = async () => {
+    if (!bridgeId) {
+      // If no active bridge, just clear local logs
+      setLogs([]);
+      return;
+    }
+
+    try {
+      const response = await fetch('/api/tcp-bridge/clear-logs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bridgeId })
+      });
+
+      const data = await response.json();
+      if (data.ok) {
+        setLogs([]);
+        // Force immediate status refresh to confirm logs are cleared
+        if (bridgeId) {
+          await pollStatus(bridgeId);
+        }
+      } else {
+        alert(`Failed to clear logs: ${data.error}`);
+      }
+    } catch (err: any) {
+      alert(`Failed to clear logs: ${err.message}`);
+    }
+  };
+
+  const downloadLogs = () => {
+    const logsText = logs.map(log =>
+      `[${log.timestamp}] ${log.type.toUpperCase()}: ${log.message}${log.data ? '\n' + JSON.stringify(log.data, null, 2) : ''}`
+    ).join('\n\n');
+
+    const blob = new Blob([logsText], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `tcp-bridge-logs-${new Date().toISOString()}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <Card id="tcp-bridge" title="TCP Bridge Server" subtitle="Run a TCP proxy server that forwards traffic from multiple clients to primary and secondary servers">
+      <div className="grid gap-6">
+        {/* Configuration */}
+        <div className="grid gap-4 md:grid-cols-3">
+          <Field label="Listen Port">
+            <Input
+              type="number"
+              placeholder="9904"
+              value={listenPort}
+              onChange={(e) => setListenPort(e.target.value)}
+              disabled={isRunning}
+            />
+          </Field>
+          <Field label="Primary Server IP">
+            <Input
+              placeholder="192.168.1.100"
+              value={primaryIp}
+              onChange={(e) => setPrimaryIp(e.target.value)}
+              disabled={isRunning}
+            />
+          </Field>
+          <Field label="Primary Server Port">
+            <Input
+              type="number"
+              placeholder="8800"
+              value={primaryPort}
+              onChange={(e) => setPrimaryPort(e.target.value)}
+              disabled={isRunning}
+            />
+          </Field>
+        </div>
+
+        {/* Secondary Servers */}
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <label className="text-sm text-neutral-300">Secondary Servers (Optional)</label>
+            <button
+              onClick={addSecondaryServer}
+              disabled={isRunning}
+              className="rounded-lg bg-neutral-800 px-3 py-1 text-xs text-neutral-300 hover:bg-neutral-700 disabled:opacity-50"
+            >
+              + Add Secondary
+            </button>
+          </div>
+          {secondaryServers.map((server, index) => (
+            <div key={index} className="grid gap-2 md:grid-cols-3 mb-2">
+              <Input
+                placeholder="Secondary IP"
+                value={server.ip}
+                onChange={(e) => updateSecondaryServer(index, 'ip', e.target.value)}
+                disabled={isRunning}
+              />
+              <Input
+                type="number"
+                placeholder="Port"
+                value={server.port}
+                onChange={(e) => updateSecondaryServer(index, 'port', e.target.value)}
+                disabled={isRunning}
+              />
+              <button
+                onClick={() => removeSecondaryServer(index)}
+                disabled={isRunning}
+                className="rounded-lg bg-red-900/20 border border-red-800 px-3 py-2 text-sm text-red-300 hover:bg-red-900/30 disabled:opacity-50"
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+        </div>
+
+        {/* Control Buttons */}
+        <div className="flex gap-3">
+          {!isRunning ? (
+            <Button onClick={startBridge} disabled={loading}>
+              {loading ? 'Starting...' : 'Start Bridge'}
+            </Button>
+          ) : (
+            <Button onClick={stopBridge} disabled={loading}>
+              {loading ? 'Stopping...' : 'Stop Bridge'}
+            </Button>
+          )}
+        </div>
+
+        {/* Status */}
+        {isRunning && (
+          <div className="rounded-xl border border-green-800 bg-green-900/10 p-4">
+            <div className="flex items-center gap-2 text-green-300">
+              <span className="h-2 w-2 rounded-full bg-green-500 animate-pulse"></span>
+              <span className="font-semibold">Bridge Running on Port {listenPort}</span>
+            </div>
+            <div className="mt-2 text-sm text-neutral-400">
+              {clients.length} client(s) connected | {logs.length} log entries
+            </div>
+          </div>
+        )}
+
+        {/* Connected Clients */}
+        {isRunning && clients.length > 0 && (
+          <div>
+            <h3 className="text-sm font-semibold text-neutral-300 mb-2">Connected Clients</h3>
+            <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 overflow-hidden">
+              <table className="w-full text-sm">
+                <thead className="bg-neutral-800/50">
+                  <tr>
+                    <th className="px-4 py-2 text-left text-neutral-300">Client ID</th>
+                    <th className="px-4 py-2 text-left text-neutral-300">Address</th>
+                    <th className="px-4 py-2 text-left text-neutral-300">Connected At</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-neutral-800">
+                  {clients.map((client) => (
+                    <tr key={client.clientId} className="text-neutral-400">
+                      <td className="px-4 py-2 font-mono text-xs">{client.clientId}</td>
+                      <td className="px-4 py-2">{client.remoteAddress}:{client.remotePort}</td>
+                      <td className="px-4 py-2">{new Date(client.connectedAt).toLocaleString()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* Logs */}
+        {logs.length > 0 && (
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-semibold text-neutral-300">Traffic Logs</h3>
+              <div className="flex gap-2">
+                <button
+                  onClick={downloadLogs}
+                  className="rounded-lg bg-blue-900/20 border border-blue-800 px-3 py-1 text-xs text-blue-300 hover:bg-blue-900/30"
+                >
+                  Download Logs
+                </button>
+                <button
+                  onClick={clearLogs}
+                  className="rounded-lg bg-neutral-800 px-3 py-1 text-xs text-neutral-300 hover:bg-neutral-700"
+                >
+                  Clear Logs
+                </button>
+              </div>
+            </div>
+
+            {/* Legend */}
+            <div className="mb-3 rounded-lg border border-neutral-800 bg-neutral-900/50 p-3">
+              <div className="text-xs font-semibold text-neutral-300 mb-2">Log Color Guide:</div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[10px]">
+                <div className="flex items-center gap-1">
+                  <div className="w-2 h-2 rounded-full bg-blue-400"></div>
+                  <span className="text-neutral-400">Client ↔ Bridge</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <div className="w-2 h-2 rounded-full bg-purple-400"></div>
+                  <span className="text-neutral-400">Primary Server</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <div className="w-2 h-2 rounded-full bg-yellow-400"></div>
+                  <span className="text-neutral-400">Secondary Servers</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <div className="w-2 h-2 rounded-full bg-red-400"></div>
+                  <span className="text-neutral-400">Errors</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Log Management Info */}
+            {logs.length >= 90 && (
+              <div className="mb-3 rounded-lg border border-yellow-800 bg-yellow-900/10 p-3 text-xs">
+                <div className="flex items-start gap-2">
+                  <span className="text-yellow-400">ℹ️</span>
+                  <div className="text-yellow-300">
+                    <strong>Showing {logs.length} of last 100 logs.</strong> The bridge keeps up to 1,000 logs in memory.
+                    Older logs are automatically removed. Use "Download Logs" to export all current logs before they're removed.
+                  </div>
+                </div>
+              </div>
+            )}
+            <div className="max-h-96 overflow-y-auto rounded-xl border border-neutral-800 bg-neutral-950 p-4 font-mono text-xs space-y-3">
+              {logs.map((log, index) => {
+                // Determine color scheme based on direction
+                const getLogStyle = () => {
+                  if (log.type.includes('error')) return 'border-red-800 bg-red-900/10';
+                  if (log.type === 'client_connected') return 'border-green-800 bg-green-900/10';
+                  if (log.type === 'client_disconnected') return 'border-orange-800 bg-orange-900/10';
+                  if (log.data?.direction === 'client_to_bridge') return 'border-blue-700 bg-blue-900/10';
+                  if (log.data?.direction === 'bridge_to_primary') return 'border-purple-700 bg-purple-900/10';
+                  if (log.data?.direction === 'primary_to_bridge') return 'border-purple-700 bg-purple-900/10';
+                  if (log.data?.direction === 'bridge_to_client') return 'border-blue-700 bg-blue-900/10';
+                  if (log.data?.direction === 'bridge_to_secondary') return 'border-yellow-700 bg-yellow-900/10';
+                  if (log.data?.direction === 'secondary_to_bridge') return 'border-yellow-700 bg-yellow-900/10';
+                  return 'border-neutral-800 bg-neutral-900/10';
+                };
+
+                const getMessageColor = () => {
+                  if (log.type.includes('error')) return 'text-red-400';
+                  if (log.type === 'client_connected') return 'text-green-400';
+                  if (log.type === 'client_disconnected') return 'text-orange-400';
+                  if (log.data?.direction?.includes('client')) return 'text-blue-400';
+                  if (log.data?.direction?.includes('primary')) return 'text-purple-400';
+                  if (log.data?.direction?.includes('secondary')) return 'text-yellow-400';
+                  return 'text-neutral-400';
+                };
+
+                return (
+                  <div key={index} className={`rounded-lg border p-3 ${getLogStyle()}`}>
+                    <div className="flex items-start gap-2">
+                      <span className="text-neutral-500 text-[10px] mt-0.5">
+                        [{new Date(log.timestamp).toLocaleTimeString()}]
+                      </span>
+                      <div className="flex-1">
+                        <div className={`font-semibold ${getMessageColor()}`}>
+                          {log.message}
+                        </div>
+                        {log.data?.clientId && (
+                          <div className="text-neutral-500 text-[10px] mt-1">
+                            Client: {log.data.clientId}
+                          </div>
+                        )}
+                        {log.data?.hex && (
+                          <div className="mt-2 rounded bg-black/30 p-2 border border-neutral-800">
+                            <div className="text-cyan-400 text-[10px] font-semibold mb-1">HEX ({log.data.length} bytes)</div>
+                            <div className="text-cyan-300 break-all">{log.data.hex}</div>
+                          </div>
+                        )}
+                        {log.data?.ascii && (
+                          <div className="mt-1 rounded bg-black/30 p-2 border border-neutral-800">
+                            <div className="text-yellow-400 text-[10px] font-semibold mb-1">ASCII</div>
+                            <div className="text-yellow-300">{log.data.ascii}</div>
+                          </div>
+                        )}
+                        {log.data?.forwardedToClient === false && (
+                          <div className="mt-1 text-orange-400 text-[10px] italic">
+                            ⚠ Response from secondary server (not forwarded to client)
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Info */}
+        <div className="rounded-xl border border-neutral-700 bg-neutral-900/30 p-4 text-sm text-neutral-400">
+          <strong className="text-neutral-300">How it works:</strong>
+          <ul className="mt-2 space-y-1 ml-4 list-disc">
+            <li>Bridge listens on the specified port and accepts multiple client connections</li>
+            <li>Data from clients is forwarded to both primary and secondary servers</li>
+            <li>Only responses from the primary server are sent back to clients</li>
+            <li>All traffic is logged for debugging with hex and ASCII representations</li>
+          </ul>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 function AboutSetup() {
   return (
     <Card id="about" title="About" subtitle="How TraqCare Tools works">
@@ -2439,6 +2936,14 @@ function AboutSetup() {
             <li className="flex gap-3">
               <span className="text-purple-400 font-semibold">•</span>
               <div>
+                <strong className="text-neutral-200">MQTT Client:</strong> Connect to MQTT brokers for pub/sub messaging with full QoS support (0, 1, 2).
+                Subscribe to topics with wildcards (+, #), publish retained messages, and monitor real-time traffic with persistent sessions.
+                Perfect for IoT messaging, telemetry data, and event-driven architectures.
+              </div>
+            </li>
+            <li className="flex gap-3">
+              <span className="text-amber-400 font-semibold">•</span>
+              <div>
                 <strong className="text-neutral-200">API Tester:</strong> Send HTTP requests to external APIs with custom headers and body.
                 Supports GET, POST, PUT, PATCH, and DELETE methods with JSON or plain text payloads.
               </div>
@@ -2450,6 +2955,14 @@ function AboutSetup() {
                 Service account credentials are kept secure on the backend.
               </div>
             </li>
+            <li className="flex gap-3">
+              <span className="text-orange-400 font-semibold">•</span>
+              <div>
+                <strong className="text-neutral-200">TCP Bridge Server:</strong> Run a TCP proxy/bridge that listens on a port and forwards traffic from multiple clients to primary and secondary servers.
+                Only primary server responses are routed back to clients. Includes comprehensive traffic logging with hex/ASCII display, loop protection, and support for simultaneous client connections.
+                Ideal for testing load balancing, protocol conversion, and debugging server communication.
+              </div>
+            </li>
           </ul>
         </div>
 
@@ -2459,29 +2972,43 @@ function AboutSetup() {
             <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-4">
               <h4 className="text-sm font-medium text-blue-300 mb-2">Persistent Connections</h4>
               <p className="text-xs text-neutral-400">
-                Maintain open TCP connections for up to 5 minutes, allowing multiple round-trip communications
-                with your device or server.
+                Maintain open TCP and MQTT connections for extended periods, allowing multiple round-trip communications
+                with devices, servers, and brokers. TCP sessions support up to 5 minutes of inactivity.
               </p>
             </div>
             <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-4">
               <h4 className="text-sm font-medium text-green-300 mb-2">State Persistence</h4>
               <p className="text-xs text-neutral-400">
-                Your settings (IP, port, packets, mode) are automatically saved to localStorage
-                and restored when you return.
+                Your settings (IP, port, packets, mode, topics) are automatically saved to localStorage
+                and restored when you return. Switch between tools without losing your configuration.
               </p>
             </div>
             <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-4">
               <h4 className="text-sm font-medium text-purple-300 mb-2">Real-time Logging</h4>
               <p className="text-xs text-neutral-400">
                 See exactly what's sent and received with color-coded hex and ASCII display,
-                including byte counts and timestamps.
+                including byte counts, timestamps, and directional flow indicators for TCP Bridge traffic.
               </p>
             </div>
             <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-4">
               <h4 className="text-sm font-medium text-orange-300 mb-2">Connection Control</h4>
               <p className="text-xs text-neutral-400">
                 Cancel hanging requests, force disconnect stuck connections, and set custom timeouts
-                for reliable testing.
+                for reliable testing. Bridge server includes loop protection and duplicate detection.
+              </p>
+            </div>
+            <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-4">
+              <h4 className="text-sm font-medium text-cyan-300 mb-2">MQTT Pub/Sub</h4>
+              <p className="text-xs text-neutral-400">
+                Full-featured MQTT client with QoS 0/1/2, wildcards (+ and #), retained messages, and TLS support.
+                Monitor multiple subscriptions simultaneously with real-time message display.
+              </p>
+            </div>
+            <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-4">
+              <h4 className="text-sm font-medium text-amber-300 mb-2">TCP Bridge/Proxy</h4>
+              <p className="text-xs text-neutral-400">
+                Run a multi-client TCP bridge that forwards traffic to primary and secondary servers.
+                Supports up to 1,000 concurrent connections with comprehensive logging and automatic log rotation.
               </p>
             </div>
           </div>
@@ -2489,7 +3016,7 @@ function AboutSetup() {
 
         <div className="rounded-xl border border-neutral-700 bg-neutral-900/30 p-4 text-sm text-neutral-400">
           <strong className="text-neutral-300">Note:</strong> This tool is designed for testing and diagnostics.
-          The backend must be running for the TCP and FCM features to work.
+          The backend must be running for TCP, UDP, MQTT, TCP Bridge, and FCM features to work. All protocol clients operate through a secure backend proxy to bypass browser security restrictions.
         </div>
       </div>
     </Card>
@@ -2497,12 +3024,14 @@ function AboutSetup() {
 }
 
 export default function App() {
+  const [activeTab, setActiveTab] = useState(0);
+
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100">
-      <Header />
+      <Header activeTab={activeTab} setActiveTab={setActiveTab} />
       <main className="mx-auto max-w-6xl px-4 pb-24">
         <Hero />
-        <Tabs>
+        <Tabs activeTab={activeTab} setActiveTab={setActiveTab}>
           <Tab label="TCP Client">
             <TcpClientTool />
           </Tab>
@@ -2517,6 +3046,9 @@ export default function App() {
           </Tab>
           <Tab label="FCM Sender">
             <FcmSenderTool />
+          </Tab>
+          <Tab label="TCP Bridge">
+            <TcpBridgeTool />
           </Tab>
           <Tab label="About">
             <AboutSetup />

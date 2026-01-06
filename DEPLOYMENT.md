@@ -31,8 +31,7 @@ npm run install:all
 Create a `.env` file in the `backend/` directory (optional for FCM):
 
 ```bash
-cd backend
-nano .env
+nano backend/.env
 ```
 
 Add your Firebase service account path (only needed if using FCM Sender):
@@ -74,8 +73,7 @@ npm install -g pm2
 Start the application:
 
 ```bash
-cd backend
-pm2 start server.js --name traqcare-tools
+pm2 start backend/server.js --name traqcare-tools --log-date-format="YYYY-MM-DD HH:mm Z"
 ```
 
 Configure PM2 to restart on system reboot:
