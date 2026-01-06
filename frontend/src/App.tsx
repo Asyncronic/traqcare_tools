@@ -1,11 +1,12 @@
 import React, { useMemo, useState } from 'react'
+import iconLogo from './icon.png'
 
 function Header() {
   return (
     <header className="sticky top-0 z-40 border-b border-neutral-800/60 bg-neutral-950/80 backdrop-blur supports-[backdrop-filter]:bg-neutral-950/60">
       <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4">
         <div className="flex items-center gap-3">
-          <div className="h-9 w-9 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-400" />
+          <img src={iconLogo} alt="TraqCare Tools Logo" className="h-9 w-9 rounded-xl" />
           <div className="text-lg font-semibold tracking-tight">TraqCare Tools</div>
           <span className="ml-2 rounded-full border border-neutral-800 px-2 py-0.5 text-xs text-neutral-400">Modern Utilities</span>
         </div>

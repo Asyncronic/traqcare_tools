@@ -81,7 +81,26 @@ Modern web-based diagnostic toolbox for IoT and fleet management teams with five
 
 ## Quick Start
 
-### 1) Backend
+### One-Command Start (Recommended)
+Start both backend and frontend simultaneously from the root directory:
+```bash
+# First time setup - install all dependencies
+npm run install:all
+
+# Start both backend and frontend
+npm run dev
+```
+
+This will:
+- Start the backend server on port 8787
+- Start the Vite dev server on port 5173 (usually)
+- Both will run concurrently in the same terminal
+
+**Important**: The backend MUST be running for the frontend to work. If you see "Cannot connect to backend server" errors in the UI, check that the backend is running on port 8787.
+
+### Manual Start (Alternative)
+
+#### 1) Backend
 ```bash
 cd backend
 npm install
@@ -97,9 +116,7 @@ npm start
 ./start-backend.sh
 ```
 
-**Important**: The backend MUST be running for the frontend to work. If you see "Cannot connect to backend server" errors in the UI, check that the backend is running on port 8787.
-
-### 2) Frontend (Vite + React + Tailwind)
+#### 2) Frontend (Vite + React + Tailwind)
 In another terminal:
 ```bash
 cd frontend

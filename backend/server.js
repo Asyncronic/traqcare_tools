@@ -154,7 +154,13 @@ app.post('/api/tcp', async (req, res) => {
 
         let buf;
         try {
-          buf = data_format === 'ascii' ? Buffer.from(pkt, 'ascii') : Buffer.from(pkt, 'hex');
+          if (data_format === 'ascii') {
+            buf = Buffer.from(pkt, 'ascii');
+          } else {
+            // Remove all whitespace from hex string before parsing
+            const cleanHex = pkt.replace(/\s+/g, '');
+            buf = Buffer.from(cleanHex, 'hex');
+          }
         } catch (parseErr) {
           const error = `Failed to parse packet #${i + 1} as ${data_format}: ${parseErr.message}`;
           addEvent('error', error);
@@ -345,7 +351,13 @@ app.post('/api/tcp/send', async (req, res) => {
     // Parse and send data
     let buf;
     try {
-      buf = data_format === 'ascii' ? Buffer.from(data, 'ascii') : Buffer.from(data, 'hex');
+      if (data_format === 'ascii') {
+        buf = Buffer.from(data, 'ascii');
+      } else {
+        // Remove all whitespace from hex string before parsing
+        const cleanHex = data.replace(/\s+/g, '');
+        buf = Buffer.from(cleanHex, 'hex');
+      }
     } catch (parseErr) {
       return res.status(400).json({ error: `Failed to parse data as ${data_format}: ${parseErr.message}` });
     }
@@ -559,7 +571,13 @@ app.post('/api/udp', async (req, res) => {
 
       let buf;
       try {
-        buf = data_format === 'ascii' ? Buffer.from(pkt, 'ascii') : Buffer.from(pkt, 'hex');
+        if (data_format === 'ascii') {
+          buf = Buffer.from(pkt, 'ascii');
+        } else {
+          // Remove all whitespace from hex string before parsing
+          const cleanHex = pkt.replace(/\s+/g, '');
+          buf = Buffer.from(cleanHex, 'hex');
+        }
       } catch (parseErr) {
         const error = `Failed to parse packet #${i + 1} as ${data_format}: ${parseErr.message}`;
         addEvent('error', error);
