@@ -5,6 +5,11 @@ import dgram from 'dgram';
 import { GoogleAuth } from 'google-auth-library';
 import crypto from 'crypto';
 import mqtt from 'mqtt';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(cors());
@@ -1167,6 +1172,17 @@ app.post('/api/fcm', async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: String(e?.message || e) });
   }
+});
+
+// ---- Serve static frontend files in production ----
+const frontendDistPath = path.join(__dirname, '../frontend/dist');
+
+// Serve static files from frontend/dist
+app.use(express.static(frontendDistPath));
+
+// Serve index.html for all non-API routes (SPA fallback)
+app.get('*', (req, res) => {
+  res.sendFile(path.join(frontendDistPath, 'index.html'));
 });
 
 const PORT = process.env.PORT || 8787;

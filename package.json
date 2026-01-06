@@ -8,7 +8,9 @@
     "dev:backend": "cd backend && npm start",
     "dev:frontend": "cd frontend && npm run dev",
     "install:all": "npm install && cd backend && npm install && cd ../frontend && npm install",
-    "build": "cd frontend && npm run build"
+    "build": "cd frontend && npm run build",
+    "start": "cd backend && npm start",
+    "build:all": "npm run build && echo 'Build complete! Run npm start to launch the server.'"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"
