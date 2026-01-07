@@ -2857,8 +2857,7 @@ function TcpBridgeTool() {
                   if (log.type === 'client_disconnected') return 'border-orange-800 bg-orange-900/10';
                   if (log.data?.direction === 'client_to_bridge') return 'border-blue-700 bg-blue-900/10';
                   if (log.data?.direction === 'bridge_to_primary') return 'border-purple-700 bg-purple-900/10';
-                  if (log.data?.direction === 'primary_to_bridge') return 'border-purple-700 bg-purple-900/10';
-                  if (log.data?.direction === 'bridge_to_client') return 'border-blue-700 bg-blue-900/10';
+                  if (log.data?.direction === 'primary_to_client') return 'border-purple-700 bg-purple-900/10';
                   if (log.data?.direction === 'bridge_to_secondary') return 'border-yellow-700 bg-yellow-900/10';
                   if (log.data?.direction === 'secondary_to_bridge') return 'border-yellow-700 bg-yellow-900/10';
                   return 'border-neutral-800 bg-neutral-900/10';
@@ -2868,9 +2867,11 @@ function TcpBridgeTool() {
                   if (log.type.includes('error')) return 'text-red-400';
                   if (log.type === 'client_connected') return 'text-green-400';
                   if (log.type === 'client_disconnected') return 'text-orange-400';
-                  if (log.data?.direction?.includes('client')) return 'text-blue-400';
-                  if (log.data?.direction?.includes('primary')) return 'text-purple-400';
-                  if (log.data?.direction?.includes('secondary')) return 'text-yellow-400';
+                  if (log.data?.direction === 'client_to_bridge') return 'text-blue-400';
+                  if (log.data?.direction === 'bridge_to_primary') return 'text-purple-400';
+                  if (log.data?.direction === 'primary_to_client') return 'text-purple-400';
+                  if (log.data?.direction === 'bridge_to_secondary') return 'text-yellow-400';
+                  if (log.data?.direction === 'secondary_to_bridge') return 'text-yellow-400';
                   return 'text-neutral-400';
                 };
 

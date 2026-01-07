@@ -1407,21 +1407,14 @@ app.post('/api/tcp-bridge/start', async (req, res) => {
         const hex = data.toString('hex');
         const ascii = data.toString('ascii').replace(/[^\x20-\x7E]/g, '.');
 
-        addLog('primary_data', `[Primary ➜ Bridge] Received ${data.length} bytes from ${primaryServer.ip}:${primaryServer.port}`, {
-          clientId,
-          direction: 'primary_to_bridge',
-          serverInfo: `${primaryServer.ip}:${primaryServer.port}`,
-          hex,
-          ascii,
-          length: data.length
-        });
-
         try {
           clientSocket.write(data);
-          addLog('forward_client', `[Bridge ➜ Client] Forwarded ${data.length} bytes to ${clientInfo}`, {
+          // Merged log: Primary -> Bridge -> Client
+          addLog('primary_response', `[Primary ➜ Bridge ➜ Client] Received ${data.length} bytes from ${primaryServer.ip}:${primaryServer.port} and forwarded to ${clientInfo}`, {
             clientId,
             clientInfo,
-            direction: 'bridge_to_client',
+            direction: 'primary_to_client',
+            serverInfo: `${primaryServer.ip}:${primaryServer.port}`,
             hex,
             ascii,
             length: data.length
