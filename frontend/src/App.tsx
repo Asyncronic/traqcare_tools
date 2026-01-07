@@ -2449,6 +2449,7 @@ function TcpBridgeTool() {
   const [clients, setClients] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [pollInterval, setPollInterval] = useState<number | null>(null);
+  const [isLogsPaused, setIsLogsPaused] = useState(false);
 
   // Save to localStorage
   React.useEffect(() => {
@@ -2591,7 +2592,10 @@ function TcpBridgeTool() {
 
       if (data.ok) {
         setClients(data.clients);
-        setLogs(data.logs);
+        // Only update logs if not paused
+        if (!isLogsPaused) {
+          setLogs(data.logs);
+        }
       }
     } catch (err) {
       console.error('Poll error:', err);
@@ -2772,6 +2776,16 @@ function TcpBridgeTool() {
               <h3 className="text-sm font-semibold text-neutral-300">Traffic Logs</h3>
               <div className="flex gap-2">
                 <button
+                  onClick={() => setIsLogsPaused(!isLogsPaused)}
+                  className={`rounded-lg border px-3 py-1 text-xs ${
+                    isLogsPaused
+                      ? 'border-orange-800 bg-orange-900/20 text-orange-300 hover:bg-orange-900/30'
+                      : 'border-neutral-800 bg-neutral-800 text-neutral-300 hover:bg-neutral-700'
+                  }`}
+                >
+                  {isLogsPaused ? '▶ Resume Logging' : '⏸ Pause Logging'}
+                </button>
+                <button
                   onClick={downloadLogs}
                   className="rounded-lg bg-blue-900/20 border border-blue-800 px-3 py-1 text-xs text-blue-300 hover:bg-blue-900/30"
                 >
@@ -2785,6 +2799,19 @@ function TcpBridgeTool() {
                 </button>
               </div>
             </div>
+
+            {/* Paused Indicator */}
+            {isLogsPaused && (
+              <div className="mb-3 rounded-lg border border-orange-800 bg-orange-900/20 p-3">
+                <div className="flex items-center gap-2 text-orange-300">
+                  <span className="text-lg">⏸</span>
+                  <span className="font-semibold">Logging Paused</span>
+                </div>
+                <div className="mt-1 text-xs text-orange-400/80">
+                  Logs are frozen for observation. Click "Resume Logging" to continue receiving new events.
+                </div>
+              </div>
+            )}
 
             {/* Legend */}
             <div className="mb-3 rounded-lg border border-neutral-800 bg-neutral-900/50 p-3">
