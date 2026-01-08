@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "description": "TraqCare Tools - IoT Diagnostic Toolbox",
+  "license": "MIT",
   "scripts": {
     "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
     "dev:backend": "cd backend && npm start",
