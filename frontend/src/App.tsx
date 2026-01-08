@@ -958,7 +958,7 @@ function TcpClientTool() {
                   return (
                     <div
                       key={i}
-                      className={`leading-relaxed ${colorClass} ${bgClass} ${fontClass}`}
+                      className={`leading-relaxed break-all overflow-wrap-anywhere ${colorClass} ${bgClass} ${fontClass}`}
                     >
                       {l}
                     </div>
@@ -1321,7 +1321,7 @@ function UdpClientTool() {
                   }
 
                   return (
-                    <div key={i} className={`leading-relaxed ${colorClass}`}>
+                    <div key={i} className={`leading-relaxed break-all overflow-wrap-anywhere ${colorClass}`}>
                       {l}
                     </div>
                   );
@@ -1845,7 +1845,7 @@ function MqttClientTool() {
                 {logs.map((line, i) => (
                   <div
                     key={i}
-                    className={`${line.includes('❌') ? 'text-red-400' :
+                    className={`break-all overflow-wrap-anywhere ${line.includes('❌') ? 'text-red-400' :
                         line.includes('✓') || line.includes('📤') ? 'text-green-400' :
                           line.includes('📩') ? 'text-blue-400' :
                             'text-neutral-300'
@@ -2450,6 +2450,12 @@ function TcpBridgeTool() {
   const [loading, setLoading] = useState(false);
   const [pollInterval, setPollInterval] = useState<number | null>(null);
   const [isLogsPaused, setIsLogsPaused] = useState(false);
+  const isLogsPausedRef = React.useRef(isLogsPaused);
+
+  // Keep ref in sync with state
+  React.useEffect(() => {
+    isLogsPausedRef.current = isLogsPaused;
+  }, [isLogsPaused]);
 
   // Save to localStorage
   React.useEffect(() => {
@@ -2592,8 +2598,8 @@ function TcpBridgeTool() {
 
       if (data.ok) {
         setClients(data.clients);
-        // Only update logs if not paused
-        if (!isLogsPaused) {
+        // Only update logs if not paused (use ref for current value)
+        if (!isLogsPausedRef.current) {
           setLogs(data.logs);
         }
       }
@@ -2855,10 +2861,8 @@ function TcpBridgeTool() {
                   if (log.type.includes('error')) return 'border-red-800 bg-red-900/10';
                   if (log.type === 'client_connected') return 'border-green-800 bg-green-900/10';
                   if (log.type === 'client_disconnected') return 'border-orange-800 bg-orange-900/10';
-                  if (log.data?.direction === 'client_to_bridge') return 'border-blue-700 bg-blue-900/10';
-                  if (log.data?.direction === 'bridge_to_primary') return 'border-purple-700 bg-purple-900/10';
+                  if (log.data?.direction === 'client_to_servers') return 'border-blue-700 bg-blue-900/10';
                   if (log.data?.direction === 'primary_to_client') return 'border-purple-700 bg-purple-900/10';
-                  if (log.data?.direction === 'bridge_to_secondary') return 'border-yellow-700 bg-yellow-900/10';
                   if (log.data?.direction === 'secondary_to_bridge') return 'border-yellow-700 bg-yellow-900/10';
                   return 'border-neutral-800 bg-neutral-900/10';
                 };
@@ -2867,10 +2871,8 @@ function TcpBridgeTool() {
                   if (log.type.includes('error')) return 'text-red-400';
                   if (log.type === 'client_connected') return 'text-green-400';
                   if (log.type === 'client_disconnected') return 'text-orange-400';
-                  if (log.data?.direction === 'client_to_bridge') return 'text-blue-400';
-                  if (log.data?.direction === 'bridge_to_primary') return 'text-purple-400';
+                  if (log.data?.direction === 'client_to_servers') return 'text-blue-400';
                   if (log.data?.direction === 'primary_to_client') return 'text-purple-400';
-                  if (log.data?.direction === 'bridge_to_secondary') return 'text-yellow-400';
                   if (log.data?.direction === 'secondary_to_bridge') return 'text-yellow-400';
                   return 'text-neutral-400';
                 };
@@ -2891,15 +2893,15 @@ function TcpBridgeTool() {
                           </div>
                         )}
                         {log.data?.hex && (
-                          <div className="mt-2 rounded bg-black/30 p-2 border border-neutral-800">
+                          <div className="mt-2 rounded bg-black/30 p-2 border border-neutral-800 overflow-hidden">
                             <div className="text-cyan-400 text-[10px] font-semibold mb-1">HEX ({log.data.length} bytes)</div>
-                            <div className="text-cyan-300 break-all">{log.data.hex}</div>
+                            <div className="text-cyan-300 break-all overflow-wrap-anywhere max-w-full">{log.data.hex}</div>
                           </div>
                         )}
                         {log.data?.ascii && (
-                          <div className="mt-1 rounded bg-black/30 p-2 border border-neutral-800">
+                          <div className="mt-1 rounded bg-black/30 p-2 border border-neutral-800 overflow-hidden">
                             <div className="text-yellow-400 text-[10px] font-semibold mb-1">ASCII</div>
-                            <div className="text-yellow-300">{log.data.ascii}</div>
+                            <div className="text-yellow-300 break-all overflow-wrap-anywhere max-w-full">{log.data.ascii}</div>
                           </div>
                         )}
                         {log.data?.forwardedToClient === false && (

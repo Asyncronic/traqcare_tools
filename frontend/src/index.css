@@ -8,3 +8,37 @@ html, body, #root {
 body {
   @apply bg-neutral-950;
 }
+
+/* Custom Scrollbar Styling */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #404040 #171717;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: #171717;
+  border-radius: 5px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: #404040;
+  border-radius: 5px;
+  border: 2px solid #171717;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: #525252;
+}
+
+*::-webkit-scrollbar-thumb:active {
+  background: #737373;
+}
+
+*::-webkit-scrollbar-corner {
+  background: #171717;
+}

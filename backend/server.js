@@ -1349,26 +1349,14 @@ app.post('/api/tcp-bridge/start', async (req, res) => {
         const hex = data.toString('hex');
         const ascii = data.toString('ascii').replace(/[^\x20-\x7E]/g, '.');
 
-        addLog('client_data', `[Client ➜ Bridge] Received ${data.length} bytes from ${clientInfo}`, {
-          clientId,
-          clientInfo,
-          direction: 'client_to_bridge',
-          hex,
-          ascii,
-          length: data.length
-        });
+        // Build list of destinations
+        const destinations = [`Primary (${primaryServer.ip}:${primaryServer.port})`];
 
         // Send to primary server
+        let primarySuccess = false;
         try {
           primaryConn.write(data);
-          addLog('forward_primary', `[Bridge ➜ Primary] Forwarded ${data.length} bytes to ${primaryServer.ip}:${primaryServer.port}`, {
-            clientId,
-            direction: 'bridge_to_primary',
-            serverInfo: `${primaryServer.ip}:${primaryServer.port}`,
-            hex,
-            ascii,
-            length: data.length
-          });
+          primarySuccess = true;
         } catch (err) {
           addLog('forward_primary_error', `[Bridge ✖ Primary] Failed to forward: ${err.message}`, {
             clientId,
@@ -1378,19 +1366,13 @@ app.post('/api/tcp-bridge/start', async (req, res) => {
         }
 
         // Send to secondary servers
+        const secondarySuccesses = [];
         secondaryConns.forEach((conn, idx) => {
           try {
             conn.write(data);
             const serverInfo = `${secondaryServers[idx].ip}:${secondaryServers[idx].port}`;
-            addLog('forward_secondary', `[Bridge ➜ Secondary ${idx + 1}] Forwarded ${data.length} bytes to ${serverInfo}`, {
-              clientId,
-              direction: 'bridge_to_secondary',
-              serverIndex: idx,
-              serverInfo,
-              hex,
-              ascii,
-              length: data.length
-            });
+            destinations.push(`Secondary ${idx + 1} (${serverInfo})`);
+            secondarySuccesses.push(idx);
           } catch (err) {
             addLog('forward_secondary_error', `[Bridge ✖ Secondary ${idx + 1}] Failed: ${err.message}`, {
               clientId,
@@ -1400,6 +1382,23 @@ app.post('/api/tcp-bridge/start', async (req, res) => {
             });
           }
         });
+
+        // Create merged log entry showing all destinations
+        if (primarySuccess || secondarySuccesses.length > 0) {
+          const destCount = (primarySuccess ? 1 : 0) + secondarySuccesses.length;
+          const destText = destinations.join(', ');
+          addLog('client_forward_all', `[Client ➜ Bridge ➜ ${destCount} Server${destCount > 1 ? 's' : ''}] Received ${data.length} bytes from ${clientInfo} and forwarded to: ${destText}`, {
+            clientId,
+            clientInfo,
+            direction: 'client_to_servers',
+            destinations,
+            primarySuccess,
+            secondaryCount: secondarySuccesses.length,
+            hex,
+            ascii,
+            length: data.length
+          });
+        }
       });
 
       // Forward data from primary server back to client
