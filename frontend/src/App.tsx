@@ -9,7 +9,8 @@ function Header({ activeTab, setActiveTab }: { activeTab: number; setActiveTab: 
     { name: 'API', index: 3 },
     { name: 'FCM', index: 4 },
     { name: 'Bridge', index: 5 },
-    { name: 'About', index: 6 },
+    { name: 'H.Bridge', index: 6 },
+    { name: 'About', index: 7 },
   ]
 
   return (
@@ -2933,6 +2934,379 @@ function TcpBridgeTool() {
   );
 }
 
+// ---------- HTTP Bridge Tool ----------
+function HttpBridgeTool() {
+  const [listenPort, setListenPort] = useState(() => localStorage.getItem('http_bridge_listen_port') || '9905');
+  const [primaryUrl, setPrimaryUrl] = useState(() => localStorage.getItem('http_bridge_primary_url') || '');
+  const [secondaryUrls, setSecondaryUrls] = useState<string[]>(() => {
+    const saved = localStorage.getItem('http_bridge_secondary_urls');
+    return saved ? JSON.parse(saved) : [];
+  });
+  const [bridgeId, setBridgeId] = useState<string | null>(null);
+  const [isRunning, setIsRunning] = useState(false);
+  const [logs, setLogs] = useState<any[]>([]);
+  const [requestCount, setRequestCount] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [pollInterval, setPollInterval] = useState<number | null>(null);
+  const [isLogsPaused, setIsLogsPaused] = useState(false);
+  const isLogsPausedRef = React.useRef(isLogsPaused);
+
+  React.useEffect(() => { isLogsPausedRef.current = isLogsPaused; }, [isLogsPaused]);
+
+  React.useEffect(() => {
+    localStorage.setItem('http_bridge_listen_port', listenPort);
+    localStorage.setItem('http_bridge_primary_url', primaryUrl);
+    localStorage.setItem('http_bridge_secondary_urls', JSON.stringify(secondaryUrls));
+  }, [listenPort, primaryUrl, secondaryUrls]);
+
+  const addSecondaryUrl = () => setSecondaryUrls([...secondaryUrls, '']);
+  const removeSecondaryUrl = (index: number) => setSecondaryUrls(secondaryUrls.filter((_, i) => i !== index));
+  const updateSecondaryUrl = (index: number, value: string) => {
+    const updated = [...secondaryUrls];
+    updated[index] = value;
+    setSecondaryUrls(updated);
+  };
+
+  const startBridge = async () => {
+    if (!listenPort || !primaryUrl) {
+      alert('Please fill in Listen Port and Primary URL');
+      return;
+    }
+
+    // URL validation
+    try { new URL(primaryUrl); } catch {
+      alert('Invalid Primary URL. Please include the protocol, e.g. https://api.example.com');
+      return;
+    }
+
+    // Loop protection
+    const isLocalhost = (h: string) => ['localhost', '127.0.0.1', '::1', '0.0.0.0'].includes(h);
+    try {
+      const p = new URL(primaryUrl);
+      const pPort = p.port ? Number(p.port) : (p.protocol === 'https:' ? 443 : 80);
+      if (isLocalhost(p.hostname) && pPort === Number(listenPort)) {
+        alert(`Loop detected: Primary URL ${primaryUrl} would connect back to the bridge on port ${listenPort}.`);
+        return;
+      }
+    } catch {}
+
+    for (let i = 0; i < secondaryUrls.length; i++) {
+      const u = secondaryUrls[i];
+      if (!u) continue;
+      try { new URL(u); } catch {
+        alert(`Invalid Secondary URL ${i + 1}: ${u}`);
+        return;
+      }
+      try {
+        const s = new URL(u);
+        const sPort = s.port ? Number(s.port) : (s.protocol === 'https:' ? 443 : 80);
+        if (isLocalhost(s.hostname) && sPort === Number(listenPort)) {
+          alert(`Loop detected: Secondary URL ${i + 1} (${u}) would connect back to the bridge on port ${listenPort}.`);
+          return;
+        }
+      } catch {}
+    }
+
+    setLoading(true);
+    try {
+      const response = await fetch('/api/http-bridge/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          listenPort: Number(listenPort),
+          primaryUrl,
+          secondaryUrls: secondaryUrls.filter(u => u.trim())
+        })
+      });
+
+      const data = await response.json();
+      if (data.ok) {
+        setBridgeId(data.bridgeId);
+        setIsRunning(true);
+        setRequestCount(0);
+        setLogs([{ timestamp: new Date().toISOString(), type: 'bridge_started', message: `HTTP Bridge started on port ${listenPort}` }]);
+
+        const interval = setInterval(() => pollStatus(data.bridgeId), 2000);
+        setPollInterval(interval);
+      } else {
+        alert(`Error: ${data.error}`);
+      }
+    } catch (err: any) {
+      alert(`Failed to start HTTP bridge: ${err.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const stopBridge = async () => {
+    if (!bridgeId) return;
+    setLoading(true);
+    try {
+      const response = await fetch('/api/http-bridge/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bridgeId })
+      });
+
+      const data = await response.json();
+      if (data.ok) {
+        setIsRunning(false);
+        setBridgeId(null);
+        setLogs(prev => [...prev, { timestamp: new Date().toISOString(), type: 'info', message: 'Bridge stopped' }]);
+        if (pollInterval) { clearInterval(pollInterval); setPollInterval(null); }
+      }
+    } catch (err: any) {
+      alert(`Failed to stop bridge: ${err.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const pollStatus = async (id: string) => {
+    try {
+      const response = await fetch(`/api/http-bridge/status/${id}`);
+      const data = await response.json();
+      if (data.ok) {
+        setRequestCount(data.requestCount);
+        if (!isLogsPausedRef.current) setLogs(data.logs);
+      }
+    } catch {}
+  };
+
+  const clearLogs = async () => {
+    if (!bridgeId) { setLogs([]); return; }
+    try {
+      const response = await fetch('/api/http-bridge/clear-logs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bridgeId })
+      });
+      const data = await response.json();
+      if (data.ok) { setLogs([]); if (bridgeId) await pollStatus(bridgeId); }
+    } catch {}
+  };
+
+  const downloadLogs = () => {
+    const text = logs.map(log =>
+      `[${log.timestamp}] ${log.type.toUpperCase()}: ${log.message}${log.data ? '\n' + JSON.stringify(log.data, null, 2) : ''}`
+    ).join('\n\n');
+    const blob = new Blob([text], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `http-bridge-logs-${new Date().toISOString()}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const getLogColor = (type: string) => {
+    if (type === 'request') return 'border-blue-800 bg-blue-950/20';
+    if (type === 'primary_response') return 'border-purple-800 bg-purple-950/20';
+    if (type === 'secondary_response') return 'border-yellow-800 bg-yellow-950/20';
+    if (type === 'secondary_error') return 'border-orange-800 bg-orange-950/20';
+    if (type === 'error') return 'border-red-800 bg-red-950/20';
+    if (type === 'bridge_started') return 'border-green-800 bg-green-950/20';
+    return 'border-neutral-800 bg-neutral-900/30';
+  };
+
+  const getLogTextColor = (type: string) => {
+    if (type === 'request') return 'text-blue-300';
+    if (type === 'primary_response') return 'text-purple-300';
+    if (type === 'secondary_response') return 'text-yellow-300';
+    if (type === 'secondary_error') return 'text-orange-300';
+    if (type === 'error') return 'text-red-300';
+    if (type === 'bridge_started') return 'text-green-300';
+    return 'text-neutral-300';
+  };
+
+  const getStatusBadge = (status?: number) => {
+    if (!status) return null;
+    const color = status < 300 ? 'text-green-400' : status < 400 ? 'text-yellow-400' : 'text-red-400';
+    return <span className={`font-mono font-bold ${color}`}>{status}</span>;
+  };
+
+  return (
+    <Card id="http-bridge" title="HTTP Bridge Server" subtitle="Run an HTTP proxy that forwards incoming requests to a primary URL and optionally carbon-copies to secondary URLs">
+      <div className="grid gap-6">
+        {/* Configuration */}
+        <div className="grid gap-4 md:grid-cols-3">
+          <Field label="Listen Port">
+            <Input
+              type="number"
+              placeholder="9905"
+              value={listenPort}
+              onChange={(e) => setListenPort(e.target.value)}
+              disabled={isRunning}
+            />
+          </Field>
+          <div className="md:col-span-2">
+            <Field label="Primary URL">
+              <Input
+                placeholder="https://api.example.com"
+                value={primaryUrl}
+                onChange={(e) => setPrimaryUrl(e.target.value)}
+                disabled={isRunning}
+              />
+            </Field>
+          </div>
+        </div>
+
+        {/* Secondary URLs */}
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <label className="text-sm text-neutral-300">Secondary URLs (Optional — carbon copy)</label>
+            <button
+              onClick={addSecondaryUrl}
+              disabled={isRunning}
+              className="rounded-lg bg-neutral-800 px-3 py-1 text-xs text-neutral-300 hover:bg-neutral-700 disabled:opacity-50"
+            >
+              + Add Secondary
+            </button>
+          </div>
+          {secondaryUrls.map((url, index) => (
+            <div key={index} className="grid gap-2 md:grid-cols-4 mb-2">
+              <div className="md:col-span-3">
+                <Input
+                  placeholder="https://secondary.example.com"
+                  value={url}
+                  onChange={(e) => updateSecondaryUrl(index, e.target.value)}
+                  disabled={isRunning}
+                />
+              </div>
+              <button
+                onClick={() => removeSecondaryUrl(index)}
+                disabled={isRunning}
+                className="rounded-lg bg-red-900/20 border border-red-800 px-3 py-2 text-sm text-red-300 hover:bg-red-900/30 disabled:opacity-50"
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+        </div>
+
+        {/* Control Buttons */}
+        <div className="flex gap-3">
+          {!isRunning ? (
+            <Button onClick={startBridge} disabled={loading}>
+              {loading ? 'Starting...' : 'Start HTTP Bridge'}
+            </Button>
+          ) : (
+            <Button onClick={stopBridge} disabled={loading}>
+              {loading ? 'Stopping...' : 'Stop HTTP Bridge'}
+            </Button>
+          )}
+        </div>
+
+        {/* Status */}
+        {isRunning && (
+          <div className="rounded-xl border border-green-800 bg-green-900/10 p-4">
+            <div className="flex items-center gap-2 text-green-300">
+              <span className="h-2 w-2 rounded-full bg-green-500 animate-pulse"></span>
+              <span className="font-semibold">HTTP Bridge Running on Port {listenPort}</span>
+            </div>
+            <div className="mt-2 text-sm text-neutral-400">
+              {requestCount} request(s) proxied | {logs.length} log entries
+            </div>
+          </div>
+        )}
+
+        {/* Logs */}
+        {logs.length > 0 && (
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-semibold text-neutral-300">Traffic Logs</h3>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setIsLogsPaused(!isLogsPaused)}
+                  className={`rounded-lg border px-3 py-1 text-xs ${
+                    isLogsPaused
+                      ? 'border-orange-800 bg-orange-900/20 text-orange-300 hover:bg-orange-900/30'
+                      : 'border-neutral-800 bg-neutral-800 text-neutral-300 hover:bg-neutral-700'
+                  }`}
+                >
+                  {isLogsPaused ? '▶ Resume Logging' : '⏸ Pause Logging'}
+                </button>
+                <button
+                  onClick={downloadLogs}
+                  className="rounded-lg bg-blue-900/20 border border-blue-800 px-3 py-1 text-xs text-blue-300 hover:bg-blue-900/30"
+                >
+                  Download Logs
+                </button>
+                <button
+                  onClick={clearLogs}
+                  className="rounded-lg bg-neutral-800 px-3 py-1 text-xs text-neutral-300 hover:bg-neutral-700"
+                >
+                  Clear Logs
+                </button>
+              </div>
+            </div>
+
+            {isLogsPaused && (
+              <div className="mb-2 rounded-lg border border-orange-800 bg-orange-900/10 px-3 py-2 text-xs text-orange-300">
+                ⏸ Logging paused — new entries are buffered on server but not shown here.
+              </div>
+            )}
+
+            <div className="space-y-2 max-h-[600px] overflow-y-auto pr-1">
+              {logs.map((log, i) => (
+                <div key={i} className={`rounded-lg border p-3 text-xs font-mono ${getLogColor(log.type)}`}>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex-1 min-w-0">
+                      <span className="text-neutral-500 text-[10px]">
+                        {new Date(log.timestamp).toLocaleTimeString()}
+                      </span>
+                      {' '}
+                      <span className={`font-semibold ${getLogTextColor(log.type)}`}>
+                        {log.message}
+                      </span>
+                      {log.data?.status && (
+                        <span className="ml-2">{getStatusBadge(log.data.status)}</span>
+                      )}
+                    </div>
+                    {log.data?.requestId && (
+                      <span className="text-neutral-600 text-[10px] shrink-0">#{log.data.requestId}</span>
+                    )}
+                  </div>
+
+                  {log.data?.bodyPreview && log.data.bodyPreview.trim() && (
+                    <div className="mt-2 rounded bg-black/30 p-2 border border-neutral-800 overflow-hidden">
+                      <div className="text-neutral-500 text-[10px] font-semibold mb-1">
+                        {log.type === 'request' ? 'Request Body' : 'Response Body'} ({log.data.bodyLength ?? 0} bytes)
+                      </div>
+                      <div className="text-neutral-300 break-all overflow-wrap-anywhere max-w-full">
+                        {log.data.bodyPreview}
+                        {log.data.bodyLength > 300 && <span className="text-neutral-500"> …</span>}
+                      </div>
+                    </div>
+                  )}
+
+                  {log.data?.forwardedToClient === false && (
+                    <div className="mt-1 text-orange-400 text-[10px] italic">
+                      ⚠ Response from secondary (not forwarded to client)
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Info */}
+        <div className="rounded-xl border border-neutral-700 bg-neutral-900/30 p-4 text-sm text-neutral-400">
+          <strong className="text-neutral-300">How it works:</strong>
+          <ul className="mt-2 space-y-1 ml-4 list-disc">
+            <li>Bridge listens on the specified port as a plain HTTP server</li>
+            <li>All incoming HTTP requests (any method, path, body) are forwarded to the primary URL</li>
+            <li>The primary server's response is sent back to the client</li>
+            <li>Requests are also carbon-copied to secondary URLs (responses ignored)</li>
+            <li>Point your device or app to <code className="text-neutral-200">http://localhost:{listenPort}</code> to intercept its HTTP traffic</li>
+          </ul>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 function AboutSetup() {
   return (
     <Card id="about" title="About" subtitle="How TraqCare Tools works">
@@ -2993,6 +3367,14 @@ function AboutSetup() {
                 Ideal for testing load balancing, protocol conversion, and debugging server communication.
               </div>
             </li>
+            <li className="flex gap-3">
+              <span className="text-teal-400 font-semibold">•</span>
+              <div>
+                <strong className="text-neutral-200">HTTP Bridge Server:</strong> Run an HTTP reverse proxy bridge that listens on a local port and forwards all incoming HTTP requests to a primary URL.
+                Optionally carbon-copies requests to secondary URLs for parallel testing. Logs every request and response with method, path, status code, and body preview.
+                Point any HTTP client or IoT device at the bridge port to intercept and inspect its traffic in real time.
+              </div>
+            </li>
           </ul>
         </div>
 
@@ -3041,12 +3423,19 @@ function AboutSetup() {
                 Supports up to 1,000 concurrent connections with comprehensive logging and automatic log rotation.
               </p>
             </div>
+            <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-4">
+              <h4 className="text-sm font-medium text-teal-300 mb-2">HTTP Bridge/Proxy</h4>
+              <p className="text-xs text-neutral-400">
+                Run an HTTP reverse proxy bridge on a local port. Forward any HTTP request to a primary URL and
+                carbon-copy to secondary URLs. Inspect requests, responses, and status codes in real time.
+              </p>
+            </div>
           </div>
         </div>
 
         <div className="rounded-xl border border-neutral-700 bg-neutral-900/30 p-4 text-sm text-neutral-400">
           <strong className="text-neutral-300">Note:</strong> This tool is designed for testing and diagnostics.
-          The backend must be running for TCP, UDP, MQTT, TCP Bridge, and FCM features to work. All protocol clients operate through a secure backend proxy to bypass browser security restrictions.
+          The backend must be running for TCP, UDP, MQTT, TCP Bridge, HTTP Bridge, and FCM features to work. All protocol clients operate through a secure backend proxy to bypass browser security restrictions.
         </div>
       </div>
     </Card>
@@ -3079,6 +3468,9 @@ export default function App() {
           </Tab>
           <Tab label="TCP Bridge">
             <TcpBridgeTool />
+          </Tab>
+          <Tab label="HTTP Bridge">
+            <HttpBridgeTool />
           </Tab>
           <Tab label="About">
             <AboutSetup />

@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import net from 'net';
+import http from 'http';
 import dgram from 'dgram';
 import { GoogleAuth } from 'google-auth-library';
 import crypto from 'crypto';
@@ -18,6 +19,7 @@ app.use(express.json({ limit: '1mb' }));
 // ---- Connection Pool for Persistent Connections ----
 const connectionPool = new Map(); // sessionId -> { socket, events, config, lastActivity, sseClients }
 const mqttConnectionPool = new Map(); // sessionId -> { client, events, messages, config, lastActivity, subscriptions }
+const httpBridgePool = new Map(); // bridgeId -> { server, port, config, logs, bridgeRef, startedAt }
 
 // SSE helper to send event to all connected clients for a session
 function broadcastToSSE(sessionId, event) {
@@ -73,6 +75,19 @@ function cleanupOldConnections() {
       bridgeServers.delete(bridgeId);
     }
   }
+
+  // Cleanup HTTP Bridge servers
+  for (const [bridgeId, bridge] of httpBridgePool.entries()) {
+    if (now - bridge.bridgeRef.lastActivity > bridgeTimeout) {
+      console.log(`Cleaning up stale HTTP bridge: ${bridgeId}`);
+      try {
+        bridge.server.closeAllConnections?.();
+        bridge.server.close();
+      } catch {}
+      httpBridgePool.delete(bridgeId);
+    }
+  }
+
 }
 
 // Cleanup stale connections every minute
@@ -1611,6 +1626,296 @@ app.post('/api/tcp-bridge/stop', (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ---- HTTP Bridge endpoints ----
+
+app.post('/api/http-bridge/start', async (req, res) => {
+  const { listenPort, primaryUrl, secondaryUrls = [] } = req.body || {};
+
+  if (!listenPort || !primaryUrl) {
+    return res.status(400).json({ error: 'listenPort and primaryUrl are required' });
+  }
+
+  // Validate primary URL
+  let parsedPrimary;
+  try {
+    parsedPrimary = new URL(primaryUrl);
+  } catch (e) {
+    return res.status(400).json({ error: `Invalid primary URL: ${primaryUrl}` });
+  }
+
+  // Loop protection
+  const isLocalhost = (hostname) => {
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '0.0.0.0';
+  };
+
+  const primaryEffectivePort = parsedPrimary.port
+    ? Number(parsedPrimary.port)
+    : parsedPrimary.protocol === 'https:' ? 443 : 80;
+
+  if (isLocalhost(parsedPrimary.hostname) && primaryEffectivePort === Number(listenPort)) {
+    return res.status(400).json({
+      error: `Loop detected: Primary URL ${primaryUrl} would connect back to the bridge on port ${listenPort}.`
+    });
+  }
+
+  // Validate and loop-check secondary URLs
+  for (let i = 0; i < secondaryUrls.length; i++) {
+    let parsedSec;
+    try {
+      parsedSec = new URL(secondaryUrls[i]);
+    } catch (e) {
+      return res.status(400).json({ error: `Invalid secondary URL ${i + 1}: ${secondaryUrls[i]}` });
+    }
+    const secPort = parsedSec.port
+      ? Number(parsedSec.port)
+      : parsedSec.protocol === 'https:' ? 443 : 80;
+    if (isLocalhost(parsedSec.hostname) && secPort === Number(listenPort)) {
+      return res.status(400).json({
+        error: `Loop detected: Secondary URL ${i + 1} (${secondaryUrls[i]}) points back to the bridge on port ${listenPort}.`
+      });
+    }
+  }
+
+  // Check if port already in use by another HTTP bridge
+  const portInUse = [...httpBridgePool.values()].some(b => String(b.port) === String(listenPort));
+  if (portInUse) {
+    return res.status(400).json({ error: `Port ${listenPort} is already in use by another HTTP bridge.` });
+  }
+
+  const bridgeId = crypto.randomBytes(16).toString('hex');
+  const logs = [];
+  const bridgeRef = { requestCount: 0, lastActivity: Date.now() };
+
+  function addLog(type, message, data = null) {
+    const entry = {
+      timestamp: new Date().toISOString(),
+      type,
+      message,
+      ...(data && { data })
+    };
+    logs.push(entry);
+    if (logs.length > 1000) logs.shift();
+  }
+
+  const basePrimaryUrl = primaryUrl.replace(/\/$/, '');
+  const baseSecondaryUrls = secondaryUrls.map(u => u.replace(/\/$/, ''));
+
+  const httpServer = http.createServer(async (clientReq, clientRes) => {
+    const requestId = crypto.randomBytes(4).toString('hex');
+    const startTime = Date.now();
+    bridgeRef.requestCount++;
+    bridgeRef.lastActivity = Date.now();
+
+    // Collect request body
+    const chunks = [];
+    clientReq.on('data', chunk => chunks.push(chunk));
+    await new Promise((resolve, reject) => {
+      clientReq.on('end', resolve);
+      clientReq.on('error', reject);
+    });
+    const bodyBuffer = Buffer.concat(chunks);
+
+    const reqPath = clientReq.url || '/';
+    const targetUrl = basePrimaryUrl + reqPath;
+
+    // Build headers to forward (drop hop-by-hop headers)
+    const hopByHop = new Set(['host', 'connection', 'keep-alive', 'content-length',
+      'transfer-encoding', 'upgrade', 'proxy-authorization', 'proxy-authenticate', 'te', 'trailers']);
+    const forwardedHeaders = {};
+    for (const [key, value] of Object.entries(clientReq.headers)) {
+      if (!hopByHop.has(key.toLowerCase())) {
+        forwardedHeaders[key] = value;
+      }
+    }
+    forwardedHeaders['x-forwarded-for'] = clientReq.socket?.remoteAddress || '';
+    forwardedHeaders['x-forwarded-host'] = clientReq.headers['host'] || '';
+
+    addLog('request', `${clientReq.method} ${reqPath} from ${clientReq.socket?.remoteAddress}`, {
+      requestId,
+      method: clientReq.method,
+      path: reqPath,
+      client: clientReq.socket?.remoteAddress,
+      bodyLength: bodyBuffer.length,
+      bodyPreview: bodyBuffer.slice(0, 300).toString('utf8'),
+      targetUrl
+    });
+
+    const noBody = ['GET', 'HEAD', 'OPTIONS'].includes((clientReq.method || '').toUpperCase());
+
+    // Forward to primary
+    try {
+      const primaryResponse = await fetch(targetUrl, {
+        method: clientReq.method,
+        headers: forwardedHeaders,
+        body: noBody ? undefined : bodyBuffer,
+        signal: AbortSignal.timeout(30000),
+        redirect: 'follow'
+      });
+
+      const responseBuffer = Buffer.from(await primaryResponse.arrayBuffer());
+      const duration = Date.now() - startTime;
+
+      // Pass response headers back (drop hop-by-hop)
+      const responseHeaders = {};
+      for (const [key, value] of primaryResponse.headers.entries()) {
+        if (!hopByHop.has(key.toLowerCase())) {
+          responseHeaders[key] = value;
+        }
+      }
+
+      clientRes.writeHead(primaryResponse.status, responseHeaders);
+      clientRes.end(responseBuffer);
+
+      addLog('primary_response', `Primary → ${primaryResponse.status} in ${duration}ms`, {
+        requestId,
+        status: primaryResponse.status,
+        duration,
+        bodyLength: responseBuffer.length,
+        bodyPreview: responseBuffer.slice(0, 300).toString('utf8'),
+        forwardedToClient: true
+      });
+
+      // Carbon-copy to secondary URLs (fire and forget)
+      baseSecondaryUrls.forEach((secBase, i) => {
+        const secUrl = secBase + reqPath;
+        const secStart = Date.now();
+        fetch(secUrl, {
+          method: clientReq.method,
+          headers: forwardedHeaders,
+          body: noBody ? undefined : bodyBuffer,
+          signal: AbortSignal.timeout(30000),
+          redirect: 'follow'
+        }).then(async (secRes) => {
+          const secBody = Buffer.from(await secRes.arrayBuffer());
+          addLog('secondary_response', `Secondary ${i + 1} → ${secRes.status} in ${Date.now() - secStart}ms`, {
+            requestId,
+            secondaryIndex: i + 1,
+            secondaryUrl: secUrl,
+            status: secRes.status,
+            duration: Date.now() - secStart,
+            bodyLength: secBody.length,
+            bodyPreview: secBody.slice(0, 300).toString('utf8'),
+            forwardedToClient: false
+          });
+        }).catch((err) => {
+          addLog('secondary_error', `Secondary ${i + 1} failed: ${err.message}`, {
+            requestId,
+            secondaryIndex: i + 1,
+            secondaryUrl: secUrl,
+            error: err.message
+          });
+        });
+      });
+
+    } catch (err) {
+      const duration = Date.now() - startTime;
+      const isTimeout = err.name === 'TimeoutError' || err.name === 'AbortError';
+      const status = isTimeout ? 504 : 502;
+      const errMsg = isTimeout ? 'Primary server timed out' : err.message;
+
+      clientRes.writeHead(status, { 'content-type': 'application/json' });
+      clientRes.end(JSON.stringify({ error: errMsg, bridgeId }));
+
+      addLog('error', `Primary failed: ${errMsg}`, { requestId, error: errMsg, duration });
+    }
+  });
+
+  httpServer.on('error', (err) => {
+    addLog('error', `Server error: ${err.message}`);
+  });
+
+  try {
+    await new Promise((resolve, reject) => {
+      httpServer.listen(Number(listenPort), '0.0.0.0', resolve);
+      httpServer.once('error', reject);
+    });
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to start HTTP bridge: ${err.message}` });
+  }
+
+  httpBridgePool.set(bridgeId, {
+    server: httpServer,
+    port: listenPort,
+    config: { listenPort, primaryUrl, secondaryUrls },
+    logs,
+    bridgeRef,
+    startedAt: new Date().toISOString()
+  });
+
+  addLog('bridge_started', `HTTP Bridge started on port ${listenPort}`, {
+    primaryUrl,
+    secondaryCount: secondaryUrls.length
+  });
+
+  res.json({
+    ok: true,
+    bridgeId,
+    listenPort,
+    primaryUrl,
+    secondaryUrls,
+    startedAt: new Date().toISOString()
+  });
+});
+
+app.get('/api/http-bridge/status/:bridgeId', (req, res) => {
+  const { bridgeId } = req.params;
+  const bridge = httpBridgePool.get(bridgeId);
+
+  if (!bridge) {
+    return res.status(404).json({ error: 'HTTP Bridge not found or expired' });
+  }
+
+  bridge.bridgeRef.lastActivity = Date.now();
+
+  res.json({
+    ok: true,
+    bridgeId,
+    running: bridge.server.listening,
+    config: bridge.config,
+    logs: bridge.logs.slice(-100),
+    requestCount: bridge.bridgeRef.requestCount,
+    startedAt: bridge.startedAt
+  });
+});
+
+app.post('/api/http-bridge/stop', async (req, res) => {
+  const { bridgeId } = req.body || {};
+
+  if (!bridgeId) {
+    return res.status(400).json({ error: 'bridgeId is required' });
+  }
+
+  const bridge = httpBridgePool.get(bridgeId);
+  if (!bridge) {
+    return res.status(404).json({ error: 'HTTP Bridge not found or already stopped' });
+  }
+
+  try {
+    bridge.server.closeAllConnections?.();
+    await new Promise((resolve) => bridge.server.close(resolve));
+  } catch (e) { /* ignore */ }
+
+  httpBridgePool.delete(bridgeId);
+
+  res.json({ ok: true, bridgeId });
+});
+
+app.post('/api/http-bridge/clear-logs', (req, res) => {
+  const { bridgeId } = req.body || {};
+
+  if (!bridgeId) {
+    return res.status(400).json({ error: 'bridgeId is required' });
+  }
+
+  const bridge = httpBridgePool.get(bridgeId);
+  if (!bridge) {
+    return res.status(404).json({ error: 'HTTP Bridge not found' });
+  }
+
+  bridge.logs.length = 0;
+  res.json({ ok: true });
 });
 
 // ---- Serve static frontend files in production ----
