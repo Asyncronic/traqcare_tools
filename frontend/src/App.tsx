@@ -3268,15 +3268,12 @@ function HttpBridgeTool() {
                     )}
                   </div>
 
-                  {log.data?.bodyPreview && log.data.bodyPreview.trim() && (
-                    <div className="mt-2 rounded bg-black/30 p-2 border border-neutral-800 overflow-hidden">
+                  {log.data?.body && log.data.body.trim() && (
+                    <div className="mt-2 rounded bg-black/30 p-2 border border-neutral-800">
                       <div className="text-neutral-500 text-[10px] font-semibold mb-1">
                         {log.type === 'request' ? 'Request Body' : 'Response Body'} ({log.data.bodyLength ?? 0} bytes)
                       </div>
-                      <div className="text-neutral-300 break-all overflow-wrap-anywhere max-w-full">
-                        {log.data.bodyPreview}
-                        {log.data.bodyLength > 300 && <span className="text-neutral-500"> …</span>}
-                      </div>
+                      <pre className="text-neutral-300 whitespace-pre-wrap break-all max-w-full">{log.data.body}</pre>
                     </div>
                   )}
 

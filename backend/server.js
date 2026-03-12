@@ -1738,7 +1738,7 @@ app.post('/api/http-bridge/start', async (req, res) => {
       path: reqPath,
       client: clientReq.socket?.remoteAddress,
       bodyLength: bodyBuffer.length,
-      bodyPreview: bodyBuffer.slice(0, 300).toString('utf8'),
+      body: bodyBuffer.toString('utf8'),
       targetUrl
     });
 
@@ -1773,7 +1773,7 @@ app.post('/api/http-bridge/start', async (req, res) => {
         status: primaryResponse.status,
         duration,
         bodyLength: responseBuffer.length,
-        bodyPreview: responseBuffer.slice(0, 300).toString('utf8'),
+        body: responseBuffer.toString('utf8'),
         forwardedToClient: true
       });
 
@@ -1796,7 +1796,7 @@ app.post('/api/http-bridge/start', async (req, res) => {
             status: secRes.status,
             duration: Date.now() - secStart,
             bodyLength: secBody.length,
-            bodyPreview: secBody.slice(0, 300).toString('utf8'),
+            body: secBody.toString('utf8'),
             forwardedToClient: false
           });
         }).catch((err) => {
