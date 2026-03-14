@@ -1742,84 +1742,62 @@ app.post('/api/http-bridge/start', async (req, res) => {
       targetUrl
     });
 
+    // Immediately reply 200 to the client
+    clientRes.writeHead(200, { 'content-type': 'application/json' });
+    clientRes.end(JSON.stringify({ status: 'ok' }));
+
+    // Forward to primary and secondary in the background
     const noBody = ['GET', 'HEAD', 'OPTIONS'].includes((clientReq.method || '').toUpperCase());
 
-    // Forward to primary
-    try {
-      const primaryResponse = await fetch(targetUrl, {
+    fetch(targetUrl, {
+      method: clientReq.method,
+      headers: forwardedHeaders,
+      body: noBody ? undefined : bodyBuffer,
+      signal: AbortSignal.timeout(30000),
+      redirect: 'follow'
+    }).then(async (primaryResponse) => {
+      const responseBuffer = Buffer.from(await primaryResponse.arrayBuffer());
+      addLog('primary_response', `Primary → ${primaryResponse.status} in ${Date.now() - startTime}ms`, {
+        requestId,
+        status: primaryResponse.status,
+        duration: Date.now() - startTime,
+        bodyLength: responseBuffer.length,
+        body: responseBuffer.toString('utf8'),
+      });
+    }).catch((err) => {
+      const errMsg = err.name === 'TimeoutError' || err.name === 'AbortError' ? 'Primary server timed out' : err.message;
+      addLog('error', `Primary failed: ${errMsg}`, { requestId, error: errMsg, duration: Date.now() - startTime });
+    });
+
+    baseSecondaryUrls.forEach((secBase, i) => {
+      const secUrl = secBase + reqPath;
+      const secStart = Date.now();
+      fetch(secUrl, {
         method: clientReq.method,
         headers: forwardedHeaders,
         body: noBody ? undefined : bodyBuffer,
         signal: AbortSignal.timeout(30000),
         redirect: 'follow'
-      });
-
-      const responseBuffer = Buffer.from(await primaryResponse.arrayBuffer());
-      const duration = Date.now() - startTime;
-
-      // Pass response headers back (drop hop-by-hop)
-      const responseHeaders = {};
-      for (const [key, value] of primaryResponse.headers.entries()) {
-        if (!hopByHop.has(key.toLowerCase())) {
-          responseHeaders[key] = value;
-        }
-      }
-
-      clientRes.writeHead(primaryResponse.status, responseHeaders);
-      clientRes.end(responseBuffer);
-
-      addLog('primary_response', `Primary → ${primaryResponse.status} in ${duration}ms`, {
-        requestId,
-        status: primaryResponse.status,
-        duration,
-        bodyLength: responseBuffer.length,
-        body: responseBuffer.toString('utf8'),
-        forwardedToClient: true
-      });
-
-      // Carbon-copy to secondary URLs (fire and forget)
-      baseSecondaryUrls.forEach((secBase, i) => {
-        const secUrl = secBase + reqPath;
-        const secStart = Date.now();
-        fetch(secUrl, {
-          method: clientReq.method,
-          headers: forwardedHeaders,
-          body: noBody ? undefined : bodyBuffer,
-          signal: AbortSignal.timeout(30000),
-          redirect: 'follow'
-        }).then(async (secRes) => {
-          const secBody = Buffer.from(await secRes.arrayBuffer());
-          addLog('secondary_response', `Secondary ${i + 1} → ${secRes.status} in ${Date.now() - secStart}ms`, {
-            requestId,
-            secondaryIndex: i + 1,
-            secondaryUrl: secUrl,
-            status: secRes.status,
-            duration: Date.now() - secStart,
-            bodyLength: secBody.length,
-            body: secBody.toString('utf8'),
-            forwardedToClient: false
-          });
-        }).catch((err) => {
-          addLog('secondary_error', `Secondary ${i + 1} failed: ${err.message}`, {
-            requestId,
-            secondaryIndex: i + 1,
-            secondaryUrl: secUrl,
-            error: err.message
-          });
+      }).then(async (secRes) => {
+        const secBody = Buffer.from(await secRes.arrayBuffer());
+        addLog('secondary_response', `Secondary ${i + 1} → ${secRes.status} in ${Date.now() - secStart}ms`, {
+          requestId,
+          secondaryIndex: i + 1,
+          secondaryUrl: secUrl,
+          status: secRes.status,
+          duration: Date.now() - secStart,
+          bodyLength: secBody.length,
+          body: secBody.toString('utf8'),
+        });
+      }).catch((err) => {
+        addLog('secondary_error', `Secondary ${i + 1} failed: ${err.message}`, {
+          requestId,
+          secondaryIndex: i + 1,
+          secondaryUrl: secUrl,
+          error: err.message
         });
       });
-
-    } catch (err) {
-      const duration = Date.now() - startTime;
-      const isTimeout = err.name === 'TimeoutError' || err.name === 'AbortError';
-      const status = isTimeout ? 504 : 502;
-      const errMsg = isTimeout ? 'Primary server timed out' : err.message;
-
-      clientRes.writeHead(status, { 'content-type': 'application/json' });
-      clientRes.end(JSON.stringify({ error: errMsg, bridgeId }));
-
-      addLog('error', `Primary failed: ${errMsg}`, { requestId, error: errMsg, duration });
-    }
+    });
   });
 
   httpServer.on('error', (err) => {

@@ -2639,11 +2639,40 @@ function TcpBridgeTool() {
   };
 
   const downloadLogs = () => {
-    const logsText = logs.map(log =>
-      `[${log.timestamp}] ${log.type.toUpperCase()}: ${log.message}${log.data ? '\n' + JSON.stringify(log.data, null, 2) : ''}`
-    ).join('\n\n');
+    const fmt = (ts: string) => new Date(ts).toLocaleTimeString('en-GB', { hour12: false });
+    const pAddr = `${primaryIp}:${primaryPort}`;
+    const sAddr = (i: number) => secondaryServers[i] ? `${secondaryServers[i].ip}:${secondaryServers[i].port}` : `S${i + 1}`;
 
-    const blob = new Blob([logsText], { type: 'text/plain' });
+    const header = [
+      `Bridge Port: ${listenPort}`,
+      `P  = ${pAddr}`,
+      ...secondaryServers.map((s, i) => `S${i + 1} = ${s.ip}:${s.port}`),
+      '---'
+    ].join('\n');
+
+    const lines = logs.map(log => {
+      const ts = fmt(log.timestamp);
+      const d = log.data || {};
+      const si = (d.serverIndex ?? 0);
+      switch (log.type) {
+        case 'client_connected':    return `[${ts}] -- C connected: ${d.clientInfo}`;
+        case 'client_disconnected': return `[${ts}] -- C disconnected: ${d.clientId}`;
+        case 'primary_connected':   return `[${ts}] -- P connected: ${pAddr}`;
+        case 'secondary_connected': return `[${ts}] -- S${si + 1} connected: ${sAddr(si)}`;
+        case 'primary_closed':      return `[${ts}] -- P disconnected: ${pAddr}`;
+        case 'secondary_closed':    return `[${ts}] -- S${si + 1} disconnected: ${sAddr(si)}`;
+        case 'client_forward_all':  return `[${ts}] C:  ${d.hex}`;
+        case 'primary_response':    return `[${ts}] P:  ${d.hex}`;
+        case 'secondary_data':      return `[${ts}] S${si + 1}: ${d.hex}`;
+        case 'bridge_started':      return `[${ts}] == Bridge started`;
+        case 'bridge_stopped':      return `[${ts}] == Bridge stopped`;
+        default:
+          if (log.type.includes('error')) return `[${ts}] !! ${log.message}`;
+          return `[${ts}] ${log.message}`;
+      }
+    });
+
+    const blob = new Blob([header + '\n' + lines.join('\n')], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
