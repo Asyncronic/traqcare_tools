@@ -113,42 +113,33 @@ For production, it's recommended to use Nginx or Apache as a reverse proxy:
 
 ### Nginx Configuration
 
-```nginx
-server {
-    listen 80;
-    server_name yourdomain.com;
+A ready-to-use config tuned for this app (including correct **Server-Sent Events**
+handling for the TCP live stream) lives at
+[deploy/nginx/traqcare-tools.conf](deploy/nginx/traqcare-tools.conf).
 
-    location / {
-        proxy_pass http://localhost:8787;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+> The SSE stream (`/api/tcp/stream/:sessionId`) gets its own `location` block with
+> `proxy_buffering off` — without this, live data appears to hang. Do **not** copy a
+> generic WebSocket-style config with `Connection: upgrade`; this app uses SSE, not
+> WebSockets, and the backend already sends a 15s heartbeat to keep the stream alive.
 
-        # Support for Server-Sent Events (TCP streaming)
-        proxy_buffering off;
-        proxy_read_timeout 86400;
-    }
-}
-```
-
-Enable the site and restart Nginx:
+Install it (run on your server):
 
 ```bash
+sudo apt update && sudo apt install -y nginx
+
+# From the project root (after git pull):
+sudo cp deploy/nginx/traqcare-tools.conf /etc/nginx/sites-available/traqcare-tools
 sudo ln -s /etc/nginx/sites-available/traqcare-tools /etc/nginx/sites-enabled/
-sudo nginx -t
-sudo systemctl restart nginx
+sudo rm -f /etc/nginx/sites-enabled/default      # remove the default welcome page
+
+sudo nginx -t                                    # validate config
+sudo systemctl reload nginx
 ```
 
-Now access your app at:
+Now access your app at `http://<your-server-ip>`.
 
-```
-http://yourdomain.com
-```
+Swap `server_name _;` in the config to a real domain (e.g. `tools.example.com`) once DNS
+is pointed at the server, then reload nginx.
 
 ## SSL/HTTPS Setup (Recommended)
 
@@ -184,16 +175,24 @@ pm2 restart traqcare-tools
 ### Ubuntu/Debian (UFW)
 
 ```bash
-# Allow your application port
-sudo ufw allow 8787/tcp
-
-# If using Nginx reverse proxy
+# With the Nginx reverse proxy, only expose 80/443 publicly:
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp
+
+# Do NOT `ufw allow 8787` — nginx reaches the backend over localhost.
+# Keep port 8787 private. (Only open it directly if you run without a reverse proxy.)
 
 # Enable firewall
 sudo ufw enable
 ```
+
+> For defense in depth, bind the backend to localhost only so 8787 is unreachable from
+> the internet even if the firewall is misconfigured. Start the server with
+> `HOST=127.0.0.1` once it sits behind nginx (defaults to `0.0.0.0` otherwise):
+>
+> ```bash
+> HOST=127.0.0.1 pm2 restart traqcare-tools --update-env
+> ```
 
 ### CentOS/RHEL (firewalld)
 

@@ -1908,4 +1908,7 @@ app.get('*', (req, res) => {
 });
 
 const PORT = process.env.PORT || 8787;
-app.listen(PORT, () => console.log('API server on :' + PORT));
+// Bind to all interfaces by default; set HOST=127.0.0.1 to keep the API private
+// behind a reverse proxy (nginx) on the same machine.
+const HOST = process.env.HOST || '0.0.0.0';
+app.listen(PORT, HOST, () => console.log(`API server on ${HOST}:${PORT}`));
