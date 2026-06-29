@@ -1,6 +1,11 @@
 import React, { useMemo, useState } from 'react'
 import iconLogo from './icon.png'
 
+// Default server host (domain or IP), configurable via Vite env vars (see frontend/.env.example).
+const DEFAULT_HOST = import.meta.env.VITE_DEFAULT_HOST ?? 'localhost'
+const DEFAULT_API_URL =
+  import.meta.env.VITE_DEFAULT_API_URL ?? `http://${DEFAULT_HOST}:7000/api/pushData`
+
 function Header({ activeTab, setActiveTab }: { activeTab: number; setActiveTab: (index: number) => void }) {
   const tabs = [
     { name: 'TCP', index: 0 },
@@ -228,7 +233,7 @@ function TcpClientTool() {
     }
   };
 
-  const [ip, setIp] = useState(() => loadState("ip", "173.212.212.92"));
+  const [ip, setIp] = useState(() => loadState("ip", DEFAULT_HOST));
   const [port, setPort] = useState(() => loadState("port", "5023"));
   const [format, setFormat] = useState<"hex" | "ascii">(() => loadState("format", "hex"));
   const [receive, setReceive] = useState(() => loadState("receive", true));
@@ -687,8 +692,8 @@ function TcpClientTool() {
         {/* Configuration Section */}
         <div className="grid gap-4">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-            <Field label="Server IP / Host">
-              <Input value={ip} onChange={(e) => setIp(e.target.value)} placeholder="e.g. 192.168.1.100" />
+            <Field label="Server Host">
+              <Input value={ip} onChange={(e) => setIp(e.target.value)} placeholder="e.g. example.com or 192.168.1.100" />
             </Field>
             <Field label="Port">
               <Input value={port} onChange={(e) => setPort(e.target.value)} placeholder="5005" />
@@ -1001,7 +1006,7 @@ function UdpClientTool() {
     }
   };
 
-  const [ip, setIp] = useState(() => loadState("ip", "173.212.212.92"));
+  const [ip, setIp] = useState(() => loadState("ip", DEFAULT_HOST));
   const [port, setPort] = useState(() => loadState("port", "5023"));
   const [format, setFormat] = useState<"hex" | "ascii">(() => loadState("format", "hex"));
   const [receive, setReceive] = useState(() => loadState("receive", true));
@@ -1202,8 +1207,8 @@ function UdpClientTool() {
         {/* Configuration Section */}
         <div className="grid gap-4">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-            <Field label="Server IP / Host">
-              <Input value={ip} onChange={(e) => setIp(e.target.value)} placeholder="e.g. 192.168.1.100" />
+            <Field label="Server Host">
+              <Input value={ip} onChange={(e) => setIp(e.target.value)} placeholder="e.g. example.com or 192.168.1.100" />
             </Field>
             <Field label="Port">
               <Input value={port} onChange={(e) => setPort(e.target.value)} placeholder="5005" />
@@ -2177,7 +2182,7 @@ function ApiTesterTool() {
   };
 
   const [method, setMethod] = useState(() => loadState("method", "POST"));
-  const [url, setUrl] = useState(() => loadState("url", "http://173.212.212.92:7000/api/pushData"));
+  const [url, setUrl] = useState(() => loadState("url", DEFAULT_API_URL));
   const [headers, setHeaders] = useState(() => loadState("headers",
     "Content-Type: application/json\nAuthorization: Bearer xxxxxxxxxxxxx"
   ));
@@ -2695,9 +2700,9 @@ function TcpBridgeTool() {
               disabled={isRunning}
             />
           </Field>
-          <Field label="Primary Server IP">
+          <Field label="Primary Server Host">
             <Input
-              placeholder="192.168.1.100"
+              placeholder="e.g. example.com or 192.168.1.100"
               value={primaryIp}
               onChange={(e) => setPrimaryIp(e.target.value)}
               disabled={isRunning}
@@ -2729,7 +2734,7 @@ function TcpBridgeTool() {
           {secondaryServers.map((server, index) => (
             <div key={index} className="grid gap-2 md:grid-cols-3 mb-2">
               <Input
-                placeholder="Secondary IP"
+                placeholder="Secondary Host"
                 value={server.ip}
                 onChange={(e) => updateSecondaryServer(index, 'ip', e.target.value)}
                 disabled={isRunning}
