@@ -2455,6 +2455,7 @@ function TcpBridgeTool() {
   const [clients, setClients] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [pollInterval, setPollInterval] = useState<number | null>(null);
+  const [totalLogs, setTotalLogs] = useState(0);
   const [isLogsPaused, setIsLogsPaused] = useState(false);
   const isLogsPausedRef = React.useRef(isLogsPaused);
 
@@ -2604,6 +2605,7 @@ function TcpBridgeTool() {
 
       if (data.ok) {
         setClients(data.clients);
+        setTotalLogs(data.totalLogs ?? data.logs.length);
         // Only update logs if not paused (use ref for current value)
         if (!isLogsPausedRef.current) {
           setLogs(data.logs);
@@ -2778,7 +2780,7 @@ function TcpBridgeTool() {
               <span className="font-semibold">Bridge Running on Port {listenPort}</span>
             </div>
             <div className="mt-2 text-sm text-neutral-400">
-              {clients.length} client(s) connected | {logs.length} log entries
+              {clients.length} client(s) connected | {totalLogs} log entries
             </div>
           </div>
         )}
@@ -2811,7 +2813,7 @@ function TcpBridgeTool() {
         )}
 
         {/* Logs */}
-        {logs.length > 0 && (
+        {(isRunning || logs.length > 0) && (
           <div>
             <div className="flex items-center justify-between mb-2">
               <h3 className="text-sm font-semibold text-neutral-300">Traffic Logs</h3>
@@ -2890,6 +2892,13 @@ function TcpBridgeTool() {
               </div>
             )}
             <div className="max-h-96 overflow-y-auto rounded-xl border border-neutral-800 bg-neutral-950 p-4 font-mono text-xs space-y-3">
+              {logs.length === 0 && (
+                <div className="py-6 text-center text-neutral-500">
+                  {isLogsPaused
+                    ? '⏸ Logging is paused — click "Resume Logging" to load entries from the server.'
+                    : 'No log entries yet. Waiting for traffic…'}
+                </div>
+              )}
               {logs.map((log, index) => {
                 // Determine color scheme based on direction
                 const getLogStyle = () => {
@@ -3245,7 +3254,7 @@ function HttpBridgeTool() {
         )}
 
         {/* Logs */}
-        {logs.length > 0 && (
+        {(isRunning || logs.length > 0) && (
           <div>
             <div className="flex items-center justify-between mb-2">
               <h3 className="text-sm font-semibold text-neutral-300">Traffic Logs</h3>
@@ -3282,6 +3291,13 @@ function HttpBridgeTool() {
             )}
 
             <div className="space-y-2 max-h-[600px] overflow-y-auto pr-1">
+              {logs.length === 0 && (
+                <div className="py-6 text-center text-xs text-neutral-500">
+                  {isLogsPaused
+                    ? '⏸ Logging is paused — click "Resume Logging" to load entries from the server.'
+                    : 'No log entries yet. Waiting for traffic…'}
+                </div>
+              )}
               {logs.map((log, i) => (
                 <div key={i} className={`rounded-lg border p-3 text-xs font-mono ${getLogColor(log.type)}`}>
                   <div className="flex items-start justify-between gap-2">
