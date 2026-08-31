@@ -1,5 +1,6 @@
-import React, { useMemo, useState } from 'react'
+import React, { useMemo, useState, useRef, useEffect } from 'react'
 import iconLogo from './icon.png'
+import { io } from "socket.io-client";
 
 // Default server host (domain or IP), configurable via Vite env vars (see frontend/.env.example).
 const DEFAULT_HOST = import.meta.env.VITE_DEFAULT_HOST ?? 'localhost'
@@ -12,10 +13,11 @@ function Header({ activeTab, setActiveTab }: { activeTab: number; setActiveTab: 
     { name: 'UDP', index: 1 },
     { name: 'MQTT', index: 2 },
     { name: 'API', index: 3 },
-    { name: 'FCM', index: 4 },
-    { name: 'Bridge', index: 5 },
-    { name: 'H.Bridge', index: 6 },
-    { name: 'About', index: 7 },
+    { name: 'Load Testing', index: 4 },
+    { name: 'FCM', index: 5 },
+    { name: 'Bridge', index: 6 },
+    { name: 'H.Bridge', index: 7 },
+    { name: 'About', index: 8 },
   ]
 
   return (
@@ -32,9 +34,8 @@ function Header({ activeTab, setActiveTab }: { activeTab: number; setActiveTab: 
               {idx > 0 && <span className="mx-3 opacity-40">•</span>}
               <button
                 onClick={() => setActiveTab(tab.index)}
-                className={`hover:text-neutral-200 cursor-pointer transition-colors ${
-                  activeTab === tab.index ? 'text-blue-400 font-medium' : ''
-                }`}
+                className={`hover:text-neutral-200 cursor-pointer transition-colors ${activeTab === tab.index ? 'text-blue-400 font-medium' : ''
+                  }`}
               >
                 {tab.name}
               </button>
@@ -1221,8 +1222,8 @@ function UdpClientTool() {
                 <button
                   onClick={() => setFormat("hex")}
                   className={`flex-1 rounded-lg border px-3 py-2 text-sm ${format === "hex"
-                      ? "border-blue-600 bg-blue-600/10 text-blue-300"
-                      : "border-neutral-800 bg-neutral-900 text-neutral-300"
+                    ? "border-blue-600 bg-blue-600/10 text-blue-300"
+                    : "border-neutral-800 bg-neutral-900 text-neutral-300"
                     }`}
                 >
                   Hex
@@ -1230,8 +1231,8 @@ function UdpClientTool() {
                 <button
                   onClick={() => setFormat("ascii")}
                   className={`flex-1 rounded-lg border px-3 py-2 text-sm ${format === "ascii"
-                      ? "border-blue-600 bg-blue-600/10 text-blue-300"
-                      : "border-neutral-800 bg-neutral-900 text-neutral-300"
+                    ? "border-blue-600 bg-blue-600/10 text-blue-300"
+                    : "border-neutral-800 bg-neutral-900 text-neutral-300"
                     }`}
                 >
                   ASCII
@@ -1852,9 +1853,9 @@ function MqttClientTool() {
                   <div
                     key={i}
                     className={`break-all overflow-wrap-anywhere ${line.includes('❌') ? 'text-red-400' :
-                        line.includes('✓') || line.includes('📤') ? 'text-green-400' :
-                          line.includes('📩') ? 'text-blue-400' :
-                            'text-neutral-300'
+                      line.includes('✓') || line.includes('📤') ? 'text-green-400' :
+                        line.includes('📩') ? 'text-blue-400' :
+                          'text-neutral-300'
                       }`}
                   >
                     {line}
@@ -2021,8 +2022,8 @@ function FcmSenderTool() {
             <button
               onClick={() => setConfigMode("json")}
               className={`rounded-lg border px-4 py-2 text-sm ${configMode === "json"
-                  ? "border-blue-600 bg-blue-600/10 text-blue-300"
-                  : "border-neutral-800 bg-neutral-900 text-neutral-300 hover:bg-neutral-800"
+                ? "border-blue-600 bg-blue-600/10 text-blue-300"
+                : "border-neutral-800 bg-neutral-900 text-neutral-300 hover:bg-neutral-800"
                 }`}
             >
               📋 Paste Service Account JSON
@@ -2030,8 +2031,8 @@ function FcmSenderTool() {
             <button
               onClick={() => setConfigMode("manual")}
               className={`rounded-lg border px-4 py-2 text-sm ${configMode === "manual"
-                  ? "border-blue-600 bg-blue-600/10 text-blue-300"
-                  : "border-neutral-800 bg-neutral-900 text-neutral-300 hover:bg-neutral-800"
+                ? "border-blue-600 bg-blue-600/10 text-blue-300"
+                : "border-neutral-800 bg-neutral-900 text-neutral-300 hover:bg-neutral-800"
                 }`}
             >
               ✏️ Manual Entry
@@ -2440,6 +2441,799 @@ function ApiTesterTool() {
   );
 }
 
+// ---------- Load Tester Tool ---------- //
+
+type LogEntry = {
+  id: string;
+  imei: string;
+  status: string;
+  duration: number;
+  ok: boolean;
+};
+
+const DEFAULT_BODY = JSON.stringify(
+  {
+    newObject: {
+      deviceId: '866334070714239',
+      acc: false,
+      speed: 8,
+      port: 5201,
+      protocolName: 'heartbeat',
+      server_time: '2025-11-01T10:57:22Z',
+      device_time: '2025-11-01T10:57:22Z',
+      latitude: 29.7876,
+      longitude: 77.8976,
+    },
+  },
+  null,
+  2
+);
+
+type LoadTestStats = {
+  total: number;
+  rps: number;
+  success: number;
+  failed: number;
+  avgLatency: number;
+
+  testDuration: number;
+  actualRuntime: number;
+  drainTime: number;
+
+  targetRps: number;
+  actualRps: number;
+  dropped: number;
+  p95Latency: number;
+};
+
+type LoadTestLog = {
+  id: string;
+  imei: string;
+  status: string;
+  duration: number;
+  ok: boolean;
+};
+
+function LoadTesterTool() {
+  const [headers, setHeaders] = useState(
+    'Content-Type: application/json\nAuthorization: Bearer xxxxxxxxxxxxx'
+  );
+
+  // --- IMEI list ---
+  const [imeis, setImeis] = useState<string[]>([]);
+  const [fileName, setFileName] = useState('');
+  const [uploadError, setUploadError] = useState('');
+  const [testDuration, setTestDuration] = useState(5);
+
+  // --- Body template + field rules ---
+  const [bodyTemplate, setBodyTemplate] = useState(DEFAULT_BODY);
+  const [bodyError, setBodyError] = useState('');
+
+  // --- Load control ---
+  const [concurrency, setConcurrency] = useState('5');
+  const [delayMs, setDelayMs] = useState('200');
+  const [isRunning, setIsRunning] = useState(false);
+  const [stats, setStats] = useState({
+    total: 0,
+    rps: 0,
+    success: 0,
+    failed: 0,
+    avgLatency: 0,
+
+    // timing
+    testDuration: 0,
+    actualRuntime: 0,
+    drainTime: 0,
+
+    // load
+    targetRps: 0,
+    actualRps: 0,
+    dropped: 0,
+    p95Latency: 0,
+  });
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+
+  // --- Refs used inside the async worker loops (avoid stale closures) ---
+  const runningRef = useRef(false);
+  const imeiIndexRef = useRef(0);
+  const countersRef = useRef<Record<string, number>>({});
+  const togglesRef = useRef<Record<string, boolean>>({});
+  const statsRef = useRef({ total: 0, success: 0, failed: 0, latencies: [] as number[] });
+  const lastFlushRef = useRef({ total: 0, time: Date.now() });
+  const [simulation, setSimulation] = useState({
+    speed: 20,
+    ignition: true,
+
+    dynamicSpeed: false,
+    speedInterval: 10,
+    minSpeed: 0,
+    maxSpeed: 80,
+
+    dynamicIgnition: false,
+    ignitionInterval: 40,
+  });
+  const socketRef = useRef<ReturnType<typeof io> | null>(null);
+
+  useEffect(() => {
+    const socket = io("http://localhost:8787", {
+      transports: ["websocket"],
+    });
+
+    socketRef.current = socket;
+
+    const onLog = (log: {
+      level: "info" | "error";
+      message: string;
+      timestamp: number;
+    }) => {
+      console.log("[LOAD TEST]", log);
+
+      setLogs((prev) => [
+        ...prev.slice(-49),
+        {
+          id: `${log.timestamp}-${Math.random()}`,
+          imei: "K6",
+          status: log.level === "error" ? "ERROR" : "INFO",
+          duration: 0,
+          ok: log.level !== "error",
+        },
+      ]);
+    };
+
+    const onStatus = (data: {
+      status: "running" | "completed" | "stopped" | "failed";
+      exitCode?: number;
+      message?: string;
+      stats?: LoadTestStats;
+    }) => {
+      console.log("[LOAD TEST STATUS]", data);
+
+      if (data.status === "running") {
+        setIsRunning(true);
+        runningRef.current = true;
+        return;
+      }
+
+      if (
+        data.status === "completed" ||
+        data.status === "stopped" ||
+        data.status === "failed"
+      ) {
+        setIsRunning(false);
+        runningRef.current = false;
+
+        // If backend already sends final stats here
+        if (data.stats) {
+          setStats(data.stats);
+        }
+
+        if (data.status === "failed" && data.message) {
+          setUploadError(data.message);
+        }
+      }
+    };
+
+    const onFinished = (data: {
+      status: "completed" | "stopped" | "failed";
+      stats?: LoadTestStats;
+      logs?: LoadTestLog[];
+    }) => {
+      console.log("[LOAD TEST FINISHED]", data);
+
+      setIsRunning(false);
+      runningRef.current = false;
+
+      // Final stats
+      if (data.stats) {
+        setStats(data.stats);
+      }
+
+      // Final logs, if backend sends them
+      if (data.logs) {
+        setLogs(data.logs);
+      }
+    };
+
+    console.log("here soxket : ", socket)
+
+    socket.on("loadtest:log", onLog);
+    socket.on("loadtest:status", onStatus);
+    socket.on("loadtest:finished", onFinished);
+
+    return () => {
+      socket.off("loadtest:log", onLog);
+      socket.off("loadtest:status", onStatus);
+      socket.off("loadtest:finished", onFinished);
+
+      socket.disconnect();
+      socketRef.current = null;
+    };
+  }, []);
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadError('');
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = String(reader.result || '');
+      const list = text
+        .split(/[\r\n,]+/)
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      const unique = Array.from(new Set(list));
+      if (unique.length === 0) {
+        setUploadError('No IMEIs found in file');
+        return;
+      }
+      setImeis(unique);
+      setFileName(file.name);
+    };
+    reader.onerror = () => setUploadError('Could not read file');
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  const startLoad = async () => {
+    if (imeis.length === 0) {
+      setUploadError('Upload an IMEI file first');
+      return;
+    }
+
+    if (bodyError) return;
+
+    statsRef.current = {
+      total: 0,
+      success: 0,
+      failed: 0,
+      latencies: [],
+    };
+
+    countersRef.current = {};
+    togglesRef.current = {};
+    imeiIndexRef.current = 0;
+
+    lastFlushRef.current = {
+      total: 0,
+      time: Date.now(),
+    };
+
+    setStats({
+      total: 0,
+      rps: 0,
+      success: 0,
+      failed: 0,
+      avgLatency: 0,
+
+      // timing
+      testDuration: 0,
+      actualRuntime: 0,
+      drainTime: 0,
+
+      // load
+      targetRps: 0,
+      actualRps: 0,
+      dropped: 0,
+      p95Latency: 0,
+    });
+
+    setLogs([]);
+
+    try {
+      const response = await fetch('/api/http-request/load-test/start', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          imeis,
+          bodyTemplate,
+          durationMinutes: testDuration,
+          simulation,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Unable to start load test');
+      }
+
+      runningRef.current = true;
+      setIsRunning(true);
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : 'Something went wrong');
+    }
+  };
+
+  const stopLoad = async () => {
+    try {
+      const response = await fetch('/api/http-request/load-test/stop', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+      const data = await response.json();
+      runningRef.current = false;
+      setIsRunning(false);
+
+      if (!response.ok) {
+        throw new Error(data.message || 'Unable to stop load test');
+      }
+    } catch (err) {
+      setUploadError(
+        err instanceof Error ? err.message : 'Unable to stop load test'
+      );
+    }
+  };
+
+  const successRate = stats.total > 0 ? Math.round((stats.success / stats.total) * 1000) / 10 : 0;
+
+  const formatDuration = (seconds: number = 0) => {
+    if (!seconds) return "0s";
+
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.round(seconds % 60);
+
+    if (mins === 0) {
+      return `${secs}s`;
+    }
+
+    return `${mins}m ${secs}s`;
+  };
+
+  return (
+    <Card
+      id="bulk-load"
+      title="Bulk Load Tester"
+      subtitle="Upload IMEIs, define how each field mutates per request, run a continuous load loop"
+    >
+      <div className="grid gap-6 md:grid-cols-3">
+        {/* Left 2/3: config */}
+        <div className="grid gap-4 md:col-span-2">
+          {/* IMEI upload */}
+          <Field label="IMEI list (CSV / TXT — one per line or comma separated)">
+            <div className="flex items-center gap-3">
+              <label className="cursor-pointer rounded-xl border border-neutral-700 bg-neutral-800 px-4 py-2 text-sm text-neutral-200 hover:bg-neutral-700">
+                Upload file
+                <input type="file" accept=".csv,.txt" className="hidden" onChange={handleFileUpload} />
+              </label>
+              {fileName && (
+                <span className="text-xs text-neutral-400">
+                  {fileName} — <span className="text-teal-400">{imeis.length} IMEIs loaded</span>
+                </span>
+              )}
+              {isRunning && (
+                <span className="text-xs text-neutral-500">(list locked while running)</span>
+              )}
+            </div>
+            {uploadError && <div className="mt-1 text-xs text-red-400">{uploadError}</div>}
+            {imeis.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1">
+                {imeis.slice(0, 10).map((im) => (
+                  <span
+                    key={im}
+                    className="rounded-md border border-neutral-800 bg-neutral-900 px-2 py-0.5 text-[11px] text-neutral-400"
+                  >
+                    {im}
+                  </span>
+                ))}
+                {imeis.length > 10 && (
+                  <span className="text-[11px] text-neutral-600">+{imeis.length - 10} more</span>
+                )}
+              </div>
+            )}
+          </Field>
+
+          <Field label="Headers (one per line: Key: Value)">
+            <Textarea
+              value={headers}
+              onChange={(e: any) => setHeaders(e.target.value)}
+              className="min-h-[80px] font-mono text-xs"
+            />
+          </Field>
+
+          {/* Body template + detected fields */}
+          <div>
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-sm text-neutral-300">Body Template (defines which fields exist)</span>
+              {bodyError && <span className="text-xs text-red-400">{bodyError}</span>}
+            </div>
+            <Textarea
+              value={bodyTemplate}
+              onChange={(e: any) => setBodyTemplate(e.target.value)}
+              className="min-h-[140px] font-mono text-xs"
+            />
+          </div>
+
+          {/* Simulation Configuration */}
+          <div className="rounded-xl border border-neutral-800 bg-neutral-950 p-4">
+            <h3 className="mb-4 text-sm font-semibold text-neutral-100">
+              Device Simulation
+            </h3>
+
+            <div className="grid gap-4 md:grid-cols-2">
+
+              {/* Default Speed */}
+              <div>
+                <label className="mb-1 block text-xs text-neutral-400">
+                  Default Speed (km/h)
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  max={200}
+                  value={simulation.speed}
+                  onChange={(e) =>
+                    setSimulation((prev) => ({
+                      ...prev,
+                      speed: Number(e.target.value),
+                    }))
+                  }
+                  className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100"
+                />
+              </div>
+
+              {/* Ignition */}
+              <div>
+                <label className="mb-1 block text-xs text-neutral-400">
+                  Default Ignition
+                </label>
+
+                <select
+                  value={simulation.ignition ? "on" : "off"}
+                  onChange={(e) =>
+                    setSimulation((prev) => ({
+                      ...prev,
+                      ignition: e.target.value === "on",
+                    }))
+                  }
+                  className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100"
+                >
+                  <option value="on">ON</option>
+                  <option value="off">OFF</option>
+                </select>
+              </div>
+
+            </div>
+
+            <hr className="my-5 border-neutral-800" />
+
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={simulation.dynamicSpeed}
+                onChange={(e) =>
+                  setSimulation((prev) => ({
+                    ...prev,
+                    dynamicSpeed: e.target.checked,
+                  }))
+                }
+              />
+
+              <span className="text-sm text-neutral-200">
+                Change Speed Automatically
+              </span>
+            </div>
+
+            {simulation.dynamicSpeed && (
+              <div className="mt-3 grid grid-cols-3 gap-3">
+
+                <div>
+                  <label className="mb-1 block text-xs text-neutral-400">
+                    Every (sec)
+                  </label>
+
+                  <input
+                    type="number"
+                    value={simulation.speedInterval}
+                    onChange={(e) =>
+                      setSimulation((prev) => ({
+                        ...prev,
+                        speedInterval: Number(e.target.value),
+                      }))
+                    }
+                    className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100"
+                  />
+                </div>
+
+                <div>
+                  <label className="mb-1 block text-xs text-neutral-400">
+                    Min Speed
+                  </label>
+
+                  <input
+                    type="number"
+                    value={simulation.minSpeed}
+                    onChange={(e) =>
+                      setSimulation((prev) => ({
+                        ...prev,
+                        minSpeed: Number(e.target.value),
+                      }))
+                    }
+                    className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100"
+                  />
+                </div>
+
+                <div>
+                  <label className="mb-1 block text-xs text-neutral-400">
+                    Max Speed
+                  </label>
+
+                  <input
+                    type="number"
+                    value={simulation.maxSpeed}
+                    onChange={(e) =>
+                      setSimulation((prev) => ({
+                        ...prev,
+                        maxSpeed: Number(e.target.value),
+                      }))
+                    }
+                    className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100"
+                  />
+                </div>
+
+              </div>
+            )}
+
+            <div className="mt-6 flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={simulation.dynamicIgnition}
+                onChange={(e) =>
+                  setSimulation((prev) => ({
+                    ...prev,
+                    dynamicIgnition: e.target.checked,
+                  }))
+                }
+              />
+
+              <span className="text-sm text-neutral-200">
+                Toggle Ignition Automatically
+              </span>
+            </div>
+
+            {simulation.dynamicIgnition && (
+              <div className="mt-3">
+
+                <label className="mb-1 block text-xs text-neutral-400">
+                  Toggle Every (sec)
+                </label>
+
+                <input
+                  type="number"
+                  value={simulation.ignitionInterval}
+                  onChange={(e) =>
+                    setSimulation((prev) => ({
+                      ...prev,
+                      ignitionInterval: Number(e.target.value),
+                    }))
+                  }
+                  className="w-52 rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100"
+                />
+
+              </div>
+            )}
+
+            <div className="mt-6 rounded-lg border border-neutral-800 bg-neutral-900 p-3 text-xs text-neutral-400">
+              <p>✓ Latitude & Longitude are generated automatically.</p>
+              <p>✓ deviceTime and serverTime always use current system time.</p>
+              <p>✓ Vehicle moves only when <b>Ignition = ON</b> and <b>Speed &gt; 3 km/h</b>.</p>
+              <p>✓ If Speed = 0 or Ignition = OFF, position remains unchanged.</p>
+            </div>
+          </div>
+          {/* Test Duration */}
+          <div className="rounded-xl border border-neutral-800 bg-neutral-950 p-4">
+            <h3 className="mb-4 text-sm font-semibold text-neutral-100">
+              Test Duration
+            </h3>
+
+            <p className="mb-4 text-xs text-neutral-400">
+              Set how long the load test should run. The backend will automatically stop
+              the test after the selected duration.
+            </p>
+
+            <div className="flex items-center gap-3">
+              <input
+                type="number"
+                min={1}
+                max={15}
+                value={testDuration}
+                onChange={(e) =>
+                  setTestDuration(
+                    Math.min(15, Math.max(1, Number(e.target.value) || 5))
+                  )
+                }
+                // disabled={isRunning}
+                className="w-28 rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-100"
+              />
+
+              <span className="text-sm text-neutral-300">Minutes</span>
+            </div>
+
+            <p className="mt-3 text-xs text-amber-400">
+              Maximum allowed duration is <strong>15 minutes</strong>.
+              If no duration is provided, the backend will use the default of
+              <strong> 5 minutes</strong>.
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            {!isRunning ? (
+              <Button onClick={startLoad}>Start Load Testing</Button>
+            ) : (
+              <button
+                onClick={stopLoad}
+                className="rounded-xl border border-red-800 bg-red-950/50 px-4 py-2 text-sm font-medium text-red-300 hover:bg-red-900/50"
+              >
+                ⏹ Stop
+              </button>
+            )}
+            {isRunning && (
+              <span className="flex items-center gap-1.5 text-xs text-teal-400">
+                <span className="h-2 w-2 animate-pulse rounded-full bg-teal-400" /> running —{' '}
+                {concurrency} workers, ~{delayMs}ms delay each
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Right 1/3: live stats + log */}
+        <div className="grid gap-4">
+          {/* Live Stats */}
+          <div className="rounded-2xl border border-neutral-800 bg-neutral-950 p-4">
+            <div className="mb-3 text-sm font-medium text-neutral-300">
+              Live Stats
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 text-center">
+              <StatBox label="Total Requests" value={stats.total} />
+
+              <StatBox
+                label="Current RPS"
+                value={`${stats.rps} req/s`}
+              />
+
+              <StatBox
+                label="Success"
+                value={stats.success}
+                color="text-green-400"
+              />
+
+              <StatBox
+                label="Failed"
+                value={stats.failed}
+                color="text-red-400"
+              />
+
+              <StatBox
+                label="Success Rate"
+                value={`${successRate}%`}
+                color={
+                  successRate >= 99
+                    ? "text-green-400"
+                    : successRate >= 95
+                      ? "text-yellow-400"
+                      : "text-red-400"
+                }
+              />
+
+              <StatBox
+                label="Avg Latency"
+                value={`${stats.avgLatency}ms`}
+              />
+            </div>
+          </div>
+
+          {/* Test Timing */}
+          <div className="rounded-2xl border border-neutral-800 bg-neutral-950 p-4">
+            <div className="mb-3 text-sm font-medium text-neutral-300">
+              Test Timing
+            </div>
+
+            <div className="grid grid-cols-3 gap-3 text-center">
+              <StatBox
+                label="Test Duration"
+                value={formatDuration(stats.testDuration)}
+              />
+
+              <StatBox
+                label="Actual Runtime"
+                value={formatDuration(stats.actualRuntime)}
+              />
+
+              <StatBox
+                label="Drain Time"
+                value={formatDuration(stats.drainTime)}
+              />
+            </div>
+          </div>
+
+          {/* Load Results */}
+          <div className="rounded-2xl border border-neutral-800 bg-neutral-950 p-4">
+            <div className="mb-3 text-sm font-medium text-neutral-300">
+              Load Results
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 text-center">
+              <StatBox
+                label="Target RPS"
+                value={`${stats.targetRps} req/s`}
+              />
+
+              <StatBox
+                label="Actual RPS"
+                value={`${stats.actualRps} req/s`}
+              />
+
+              <StatBox
+                label="Dropped"
+                value={stats.dropped}
+                color={
+                  stats.dropped > 0
+                    ? "text-yellow-400"
+                    : "text-green-400"
+                }
+              />
+
+              <StatBox
+                label="P95 Latency"
+                value={`${stats.p95Latency}ms`}
+              />
+            </div>
+          </div>
+
+          {/* Live Log */}
+          <div className="rounded-2xl border border-neutral-800 bg-neutral-950 p-4">
+            <div className="mb-2 text-sm font-medium text-neutral-300">
+              Live Log (last 50)
+            </div>
+
+            <div className="max-h-[400px] overflow-auto rounded-xl border border-neutral-800 bg-neutral-900/50 p-2">
+              {logs.length === 0 ? (
+                <div className="py-8 text-center text-xs text-neutral-600">
+                  No requests yet
+                </div>
+              ) : (
+                <div className="grid gap-1">
+                  {logs.map((log) => (
+                    <div
+                      key={log.id}
+                      className={`flex items-center justify-between rounded-lg px-2 py-1 text-[11px] ${log.ok
+                        ? "text-neutral-400"
+                        : "bg-red-950/30 text-red-300"
+                        }`}
+                    >
+                      <span className="font-mono">
+                        {log.imei}
+                      </span>
+
+                      <span>{log.status}</span>
+
+                      <span className="text-neutral-600">
+                        {log.duration}ms
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </Card >
+  );
+};
+
+const StatBox: React.FC<{ label: string; value: string | number; color?: string }> = ({
+  label,
+  value,
+  color,
+}) => (
+  <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-2">
+    <div className={`text-lg font-semibold ${color || 'text-neutral-100'}`}>{value}</div>
+    <div className="text-[10px] text-neutral-500">{label}</div>
+  </div>
+);
+
 // ---------- TCP Bridge Tool ----------
 function TcpBridgeTool() {
   const [listenPort, setListenPort] = useState(() => localStorage.getItem('bridge_listen_port') || '9904');
@@ -2495,10 +3289,10 @@ function TcpBridgeTool() {
     // ---- Loop Protection Validation ----
     const isLocalhost = (ip: string) => {
       return ip === 'localhost' ||
-             ip === '127.0.0.1' ||
-             ip === '::1' ||
-             ip === '0.0.0.0' ||
-             ip === '::';
+        ip === '127.0.0.1' ||
+        ip === '::1' ||
+        ip === '0.0.0.0' ||
+        ip === '::';
     };
 
     // Check if primary server would create a loop
@@ -2662,17 +3456,17 @@ function TcpBridgeTool() {
       const d = log.data || {};
       const si = (d.serverIndex ?? 0);
       switch (log.type) {
-        case 'client_connected':    return `[${ts}] -- C connected: ${d.clientInfo}`;
+        case 'client_connected': return `[${ts}] -- C connected: ${d.clientInfo}`;
         case 'client_disconnected': return `[${ts}] -- C disconnected: ${d.clientId}`;
-        case 'primary_connected':   return `[${ts}] -- P connected: ${pAddr}`;
+        case 'primary_connected': return `[${ts}] -- P connected: ${pAddr}`;
         case 'secondary_connected': return `[${ts}] -- S${si + 1} connected: ${sAddr(si)}`;
-        case 'primary_closed':      return `[${ts}] -- P disconnected: ${pAddr}`;
-        case 'secondary_closed':    return `[${ts}] -- S${si + 1} disconnected: ${sAddr(si)}`;
-        case 'client_forward_all':  return `[${ts}] C:  ${d.hex}`;
-        case 'primary_response':    return `[${ts}] P:  ${d.hex}`;
-        case 'secondary_data':      return `[${ts}] S${si + 1}: ${d.hex}`;
-        case 'bridge_started':      return `[${ts}] == Bridge started`;
-        case 'bridge_stopped':      return `[${ts}] == Bridge stopped`;
+        case 'primary_closed': return `[${ts}] -- P disconnected: ${pAddr}`;
+        case 'secondary_closed': return `[${ts}] -- S${si + 1} disconnected: ${sAddr(si)}`;
+        case 'client_forward_all': return `[${ts}] C:  ${d.hex}`;
+        case 'primary_response': return `[${ts}] P:  ${d.hex}`;
+        case 'secondary_data': return `[${ts}] S${si + 1}: ${d.hex}`;
+        case 'bridge_started': return `[${ts}] == Bridge started`;
+        case 'bridge_stopped': return `[${ts}] == Bridge stopped`;
         default:
           if (log.type.includes('error')) return `[${ts}] !! ${log.message}`;
           return `[${ts}] ${log.message}`;
@@ -2820,11 +3614,10 @@ function TcpBridgeTool() {
               <div className="flex gap-2">
                 <button
                   onClick={() => setIsLogsPaused(!isLogsPaused)}
-                  className={`rounded-lg border px-3 py-1 text-xs ${
-                    isLogsPaused
-                      ? 'border-orange-800 bg-orange-900/20 text-orange-300 hover:bg-orange-900/30'
-                      : 'border-neutral-800 bg-neutral-800 text-neutral-300 hover:bg-neutral-700'
-                  }`}
+                  className={`rounded-lg border px-3 py-1 text-xs ${isLogsPaused
+                    ? 'border-orange-800 bg-orange-900/20 text-orange-300 hover:bg-orange-900/30'
+                    : 'border-neutral-800 bg-neutral-800 text-neutral-300 hover:bg-neutral-700'
+                    }`}
                 >
                   {isLogsPaused ? '▶ Resume Logging' : '⏸ Pause Logging'}
                 </button>
@@ -3031,7 +3824,7 @@ function HttpBridgeTool() {
         alert(`Loop detected: Primary URL ${primaryUrl} would connect back to the bridge on port ${listenPort}.`);
         return;
       }
-    } catch {}
+    } catch { }
 
     for (let i = 0; i < secondaryUrls.length; i++) {
       const u = secondaryUrls[i];
@@ -3047,7 +3840,7 @@ function HttpBridgeTool() {
           alert(`Loop detected: Secondary URL ${i + 1} (${u}) would connect back to the bridge on port ${listenPort}.`);
           return;
         }
-      } catch {}
+      } catch { }
     }
 
     setLoading(true);
@@ -3113,7 +3906,7 @@ function HttpBridgeTool() {
         setRequestCount(data.requestCount);
         if (!isLogsPausedRef.current) setLogs(data.logs);
       }
-    } catch {}
+    } catch { }
   };
 
   const clearLogs = async () => {
@@ -3126,7 +3919,7 @@ function HttpBridgeTool() {
       });
       const data = await response.json();
       if (data.ok) { setLogs([]); if (bridgeId) await pollStatus(bridgeId); }
-    } catch {}
+    } catch { }
   };
 
   const downloadLogs = () => {
@@ -3261,11 +4054,10 @@ function HttpBridgeTool() {
               <div className="flex gap-2">
                 <button
                   onClick={() => setIsLogsPaused(!isLogsPaused)}
-                  className={`rounded-lg border px-3 py-1 text-xs ${
-                    isLogsPaused
-                      ? 'border-orange-800 bg-orange-900/20 text-orange-300 hover:bg-orange-900/30'
-                      : 'border-neutral-800 bg-neutral-800 text-neutral-300 hover:bg-neutral-700'
-                  }`}
+                  className={`rounded-lg border px-3 py-1 text-xs ${isLogsPaused
+                    ? 'border-orange-800 bg-orange-900/20 text-orange-300 hover:bg-orange-900/30'
+                    : 'border-neutral-800 bg-neutral-800 text-neutral-300 hover:bg-neutral-700'
+                    }`}
                 >
                   {isLogsPaused ? '▶ Resume Logging' : '⏸ Pause Logging'}
                 </button>
@@ -3509,6 +4301,12 @@ export default function App() {
           </Tab>
           <Tab label="API Tester">
             <ApiTesterTool />
+          </Tab>
+          <Tab label="Load Tester">
+            <LoadTesterTool />
+          </Tab>
+          <Tab label="HTTP Bridge">
+            <HttpBridgeTool />
           </Tab>
           <Tab label="FCM Sender">
             <FcmSenderTool />
