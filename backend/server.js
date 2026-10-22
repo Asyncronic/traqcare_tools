@@ -5,12 +5,15 @@ import http from 'http';
 import dgram from 'dgram';
 import { GoogleAuth } from 'google-auth-library';
 import crypto from 'crypto';
+import fs from 'fs';
 import mqtt from 'mqtt';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const TCP_BRIDGES_FILE = path.join(DATA_DIR, 'tcp-bridges.json');
 
 const app = express();
 app.use(cors());
@@ -59,8 +62,9 @@ function cleanupOldConnections() {
 
   // Cleanup TCP Bridge servers
   const bridgeTimeout = 60 * 60 * 1000; // 1 hour timeout for bridges
+  // Persistent bridges are kept until stopped manually
   for (const [bridgeId, bridge] of bridgeServers.entries()) {
-    if (now - bridge.lastActivity > bridgeTimeout) {
+    if (!bridge.persistent && now - bridge.lastActivity > bridgeTimeout) {
       console.log(`Cleaning up stale TCP bridge: ${bridgeId}`);
       try {
         bridge.clients.forEach((client) => {
@@ -1215,7 +1219,7 @@ const bridgeServers = new Map(); // bridgeId -> { server, port, config, clients,
 
 // Start TCP Bridge Server
 app.post('/api/tcp-bridge/start', async (req, res) => {
-  const { listenPort, primaryServer, secondaryServers = [] } = req.body || {};
+  const { listenPort, primaryServer, secondaryServers = [], persistent = false } = req.body || {};
 
   if (!listenPort || !primaryServer?.ip || !primaryServer?.port) {
     return res.status(400).json({ error: 'listenPort, primaryServer.ip, and primaryServer.port are required' });
@@ -1269,6 +1273,31 @@ app.post('/api/tcp-bridge/start', async (req, res) => {
   }
 
   const bridgeId = crypto.randomBytes(16).toString('hex');
+  launchTcpBridge({ bridgeId, listenPort, primaryServer, secondaryServers, persistent: !!persistent }, (err, bridge) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    if (bridge.persistent) saveTcpBridges();
+    res.json({
+      ok: true,
+      bridgeId,
+      persistent: bridge.persistent,
+      message: `TCP Bridge started on port ${listenPort}`,
+      config: bridge.config
+    });
+  });
+});
+
+// Starts a bridge listener; done(err, bridge) fires once.
+// retryOnError (used when restoring persistent bridges after a restart) registers the bridge right away
+// and keeps retrying the listen every 30s instead of failing, e.g. while the port is still taken.
+function launchTcpBridge({ bridgeId, listenPort, primaryServer, secondaryServers, persistent, startedAt, retryOnError = false }, done) {
+  let settled = false;
+  const finish = (err, bridge) => {
+    if (settled) return;
+    settled = true;
+    done(err, bridge);
+  };
   const logs = [];
   const clients = new Map(); // clientId -> { socket, remoteAddress, remotePort, primaryConnection, secondaryConnections }
 
@@ -1471,44 +1500,100 @@ app.post('/api/tcp-bridge/start', async (req, res) => {
       });
     });
 
-    server.listen(listenPort, () => {
-      addLog('bridge_started', `TCP Bridge listening on port ${listenPort}`);
+    const bridge = {
+      server,
+      port: listenPort,
+      config: {
+        listenPort,
+        primaryServer,
+        secondaryServers
+      },
+      persistent: !!persistent,
+      clients,
+      logs,
+      lastActivity: Date.now(),
+      startedAt: startedAt || new Date().toISOString(),
+      retryTimer: null
+    };
 
-      bridgeServers.set(bridgeId, {
-        server,
-        port: listenPort,
-        config: {
-          listenPort,
-          primaryServer,
-          secondaryServers
-        },
-        clients,
-        logs,
-        lastActivity: Date.now(),
-        startedAt: new Date().toISOString()
-      });
+    if (retryOnError) bridgeServers.set(bridgeId, bridge);
 
-      res.json({
-        ok: true,
-        bridgeId,
-        message: `TCP Bridge started on port ${listenPort}`,
-        config: {
-          listenPort,
-          primaryServer,
-          secondaryServers
-        }
-      });
+    server.on('listening', () => {
+      addLog('bridge_started', `TCP Bridge listening on port ${listenPort}${bridge.persistent ? ' (persistent)' : ''}`);
+      bridgeServers.set(bridgeId, bridge);
+      finish(null, bridge);
     });
 
     server.on('error', (err) => {
       addLog('bridge_error', `Bridge server error: ${err.message}`);
-      res.status(500).json({ error: err.message });
+      if (retryOnError && !server.listening && bridgeServers.get(bridgeId) === bridge) {
+        addLog('bridge_retry', `Retrying listen on port ${listenPort} in 30s`);
+        bridge.retryTimer = setTimeout(() => {
+          bridge.retryTimer = null;
+          if (bridgeServers.get(bridgeId) === bridge) server.listen(listenPort);
+        }, 30000);
+        return;
+      }
+      finish(err);
     });
+
+    server.listen(listenPort);
 
   } catch (err) {
     addLog('bridge_start_error', `Failed to start bridge: ${err.message}`);
-    res.status(500).json({ error: err.message });
+    finish(err);
   }
+}
+
+// Persistent bridges are saved here so they come back after a backend restart
+function saveTcpBridges() {
+  const saved = [...bridgeServers.entries()]
+    .filter(([, bridge]) => bridge.persistent)
+    .map(([bridgeId, bridge]) => ({ bridgeId, config: bridge.config, startedAt: bridge.startedAt }));
+  try {
+    fs.mkdirSync(path.dirname(TCP_BRIDGES_FILE), { recursive: true });
+    fs.writeFileSync(TCP_BRIDGES_FILE, JSON.stringify(saved, null, 2));
+  } catch (err) {
+    console.error(`Failed to save persistent TCP bridges: ${err.message}`);
+  }
+}
+
+function restoreTcpBridges() {
+  let saved = [];
+  try {
+    if (!fs.existsSync(TCP_BRIDGES_FILE)) return;
+    saved = JSON.parse(fs.readFileSync(TCP_BRIDGES_FILE, 'utf8'));
+  } catch (err) {
+    console.error(`Failed to read persistent TCP bridges: ${err.message}`);
+    return;
+  }
+  for (const item of saved) {
+    const { listenPort, primaryServer, secondaryServers = [] } = item?.config || {};
+    if (!item?.bridgeId || !listenPort || !primaryServer?.ip || !primaryServer?.port) continue;
+    launchTcpBridge({
+      bridgeId: item.bridgeId,
+      listenPort,
+      primaryServer,
+      secondaryServers,
+      persistent: true,
+      startedAt: item.startedAt,
+      retryOnError: true
+    }, () => {});
+    console.log(`Restored persistent TCP bridge ${item.bridgeId} on port ${listenPort}`);
+  }
+}
+
+// List running TCP bridges (lets a reopened tab find and re-attach to its bridge)
+app.get('/api/tcp-bridge/list', (req, res) => {
+  const bridges = [...bridgeServers.entries()].map(([bridgeId, bridge]) => ({
+    bridgeId,
+    running: bridge.server.listening,
+    persistent: bridge.persistent,
+    config: bridge.config,
+    totalClients: bridge.clients.size,
+    startedAt: bridge.startedAt
+  }));
+  res.json({ ok: true, bridges });
 });
 
 // Get TCP Bridge Status
@@ -1533,6 +1618,7 @@ app.get('/api/tcp-bridge/status/:bridgeId', (req, res) => {
     ok: true,
     bridgeId,
     running: bridge.server.listening,
+    persistent: bridge.persistent,
     config: bridge.config,
     clients: clientsInfo,
     totalClients: clientsInfo.length,
@@ -1615,7 +1701,9 @@ app.post('/api/tcp-bridge/stop', (req, res) => {
       });
     });
 
+    clearTimeout(bridge.retryTimer);
     bridgeServers.delete(bridgeId);
+    if (bridge.persistent) saveTcpBridges();
 
     res.json({
       ok: true,
@@ -1911,4 +1999,7 @@ const PORT = process.env.PORT || 8787;
 // Bind to all interfaces by default; set HOST=127.0.0.1 to keep the API private
 // behind a reverse proxy (nginx) on the same machine.
 const HOST = process.env.HOST || '0.0.0.0';
-app.listen(PORT, HOST, () => console.log(`API server on ${HOST}:${PORT}`));
+app.listen(PORT, HOST, () => {
+  console.log(`API server on ${HOST}:${PORT}`);
+  restoreTcpBridges();
+});

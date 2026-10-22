@@ -10,3 +10,4 @@ yarn-error.log*
 *.log
 *.sh
 CLAUDE.md
+backend/data/

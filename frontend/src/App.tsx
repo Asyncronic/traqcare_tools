@@ -2454,8 +2454,12 @@ function TcpBridgeTool() {
   const [logs, setLogs] = useState<any[]>([]);
   const [clients, setClients] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
-  const [pollInterval, setPollInterval] = useState<number | null>(null);
+  const pollRef = React.useRef<number | null>(null);
   const [totalLogs, setTotalLogs] = useState(0);
+  // Persistent bridges keep running on the backend after this tab closes (and after backend restarts)
+  const [persistent, setPersistent] = useState(() => localStorage.getItem('bridge_persistent') === 'true');
+  const [isPersistentBridge, setIsPersistentBridge] = useState(false);
+  const [serverBridges, setServerBridges] = useState<any[]>([]);
   const [isLogsPaused, setIsLogsPaused] = useState(false);
   const isLogsPausedRef = React.useRef(isLogsPaused);
 
@@ -2470,7 +2474,91 @@ function TcpBridgeTool() {
     localStorage.setItem('bridge_primary_ip', primaryIp);
     localStorage.setItem('bridge_primary_port', primaryPort);
     localStorage.setItem('bridge_secondary_servers', JSON.stringify(secondaryServers));
-  }, [listenPort, primaryIp, primaryPort, secondaryServers]);
+    localStorage.setItem('bridge_persistent', String(persistent));
+  }, [listenPort, primaryIp, primaryPort, secondaryServers, persistent]);
+
+  const stopPolling = () => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  };
+
+  const startPolling = (id: string) => {
+    stopPolling();
+    pollStatus(id);
+    pollRef.current = window.setInterval(() => pollStatus(id), 2000);
+  };
+
+  const resetBridgeState = () => {
+    stopPolling();
+    setIsRunning(false);
+    setBridgeId(null);
+    setIsPersistentBridge(false);
+    setClients([]);
+    localStorage.removeItem('bridge_active_id');
+  };
+
+  const fetchServerBridges = async () => {
+    try {
+      const response = await fetch('/api/tcp-bridge/list');
+      const data = await response.json();
+      if (data.ok) setServerBridges(data.bridges);
+    } catch (err) {
+      console.error('Failed to list bridges:', err);
+    }
+  };
+
+  // Attach this tab to a bridge already running on the backend
+  const attachBridge = (bridge: any) => {
+    const cfg = bridge.config;
+    setListenPort(String(cfg.listenPort));
+    setPrimaryIp(cfg.primaryServer.ip);
+    setPrimaryPort(String(cfg.primaryServer.port));
+    setSecondaryServers((cfg.secondaryServers || []).map((s: any) => ({ ip: s.ip, port: String(s.port) })));
+    setBridgeId(bridge.bridgeId);
+    setIsPersistentBridge(!!bridge.persistent);
+    setIsRunning(true);
+    localStorage.setItem('bridge_active_id', bridge.bridgeId);
+    startPolling(bridge.bridgeId);
+  };
+
+  // On load: re-attach to the bridge this browser started, and list other running bridges
+  React.useEffect(() => {
+    const savedId = localStorage.getItem('bridge_active_id');
+    if (savedId) {
+      fetch(`/api/tcp-bridge/status/${savedId}`)
+        .then(r => r.json())
+        .then(data => {
+          if (data.ok) attachBridge(data);
+          else localStorage.removeItem('bridge_active_id');
+        })
+        .catch(() => {});
+    }
+    fetchServerBridges();
+    return stopPolling;
+  }, []);
+
+  // While no bridge is attached, keep the list of running bridges fresh
+  React.useEffect(() => {
+    if (isRunning) return;
+    const interval = window.setInterval(fetchServerBridges, 5000);
+    return () => clearInterval(interval);
+  }, [isRunning]);
+
+  const stopServerBridge = async (id: string) => {
+    if (!confirm('Stop this bridge? Devices connected to it will be disconnected.')) return;
+    try {
+      await fetch('/api/tcp-bridge/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bridgeId: id })
+      });
+    } catch (err: any) {
+      alert(`Failed to stop bridge: ${err.message}`);
+    }
+    fetchServerBridges();
+  };
 
   const addSecondaryServer = () => {
     setSecondaryServers([...secondaryServers, { ip: '', port: '' }]);
@@ -2546,19 +2634,21 @@ function TcpBridgeTool() {
           primaryServer: { ip: primaryIp, port: Number(primaryPort) },
           secondaryServers: secondaryServers
             .filter(s => s.ip && s.port)
-            .map(s => ({ ip: s.ip, port: Number(s.port) }))
+            .map(s => ({ ip: s.ip, port: Number(s.port) })),
+          persistent
         })
       });
 
       const data = await response.json();
       if (data.ok) {
         setBridgeId(data.bridgeId);
+        setIsPersistentBridge(!!data.persistent);
         setIsRunning(true);
         setLogs([{ timestamp: new Date().toISOString(), type: 'info', message: data.message }]);
+        localStorage.setItem('bridge_active_id', data.bridgeId);
 
         // Start polling for status
-        const interval = setInterval(() => pollStatus(data.bridgeId), 2000);
-        setPollInterval(interval);
+        startPolling(data.bridgeId);
       } else {
         alert(`Error: ${data.error}`);
       }
@@ -2581,15 +2671,10 @@ function TcpBridgeTool() {
       });
 
       const data = await response.json();
-      if (data.ok) {
-        setIsRunning(false);
-        setBridgeId(null);
+      if (data.ok || response.status === 404) {
+        resetBridgeState();
         setLogs(prev => [...prev, { timestamp: new Date().toISOString(), type: 'info', message: 'Bridge stopped' }]);
-
-        if (pollInterval) {
-          clearInterval(pollInterval);
-          setPollInterval(null);
-        }
+        fetchServerBridges();
       }
     } catch (err: any) {
       alert(`Failed to stop bridge: ${err.message}`);
@@ -2601,6 +2686,13 @@ function TcpBridgeTool() {
   const pollStatus = async (id: string) => {
     try {
       const response = await fetch(`/api/tcp-bridge/status/${id}`);
+      if (response.status === 404) {
+        // Bridge was stopped elsewhere (another tab, idle cleanup, or backend restart)
+        resetBridgeState();
+        setLogs(prev => [...prev, { timestamp: new Date().toISOString(), type: 'info', message: 'Bridge is no longer running on the server' }]);
+        fetchServerBridges();
+        return;
+      }
       const data = await response.json();
 
       if (data.ok) {
@@ -2760,7 +2852,7 @@ function TcpBridgeTool() {
         </div>
 
         {/* Control Buttons */}
-        <div className="flex gap-3">
+        <div className="flex flex-wrap items-center gap-4">
           {!isRunning ? (
             <Button onClick={startBridge} disabled={loading}>
               {loading ? 'Starting...' : 'Start Bridge'}
@@ -2770,6 +2862,22 @@ function TcpBridgeTool() {
               {loading ? 'Stopping...' : 'Stop Bridge'}
             </Button>
           )}
+          <div className="flex items-center gap-2">
+            <input
+              id="bridgePersistent"
+              type="checkbox"
+              className="h-4 w-4 rounded border-neutral-700 bg-neutral-900"
+              checked={isRunning ? isPersistentBridge : persistent}
+              onChange={(e) => setPersistent(e.target.checked)}
+              disabled={isRunning}
+            />
+            <label htmlFor="bridgePersistent" className="text-sm text-neutral-300">
+              Persistent
+            </label>
+            <span className="text-xs text-neutral-500">
+              (keeps running after this tab is closed and after server restarts, until you click Stop)
+            </span>
+          </div>
         </div>
 
         {/* Status */}
@@ -2778,9 +2886,64 @@ function TcpBridgeTool() {
             <div className="flex items-center gap-2 text-green-300">
               <span className="h-2 w-2 rounded-full bg-green-500 animate-pulse"></span>
               <span className="font-semibold">Bridge Running on Port {listenPort}</span>
+              {isPersistentBridge && (
+                <span className="rounded-md border border-blue-700 bg-blue-900/30 px-2 py-0.5 text-xs text-blue-300">Persistent</span>
+              )}
             </div>
             <div className="mt-2 text-sm text-neutral-400">
               {clients.length} client(s) connected | {totalLogs} log entries
+              {!isPersistentBridge && ' | stops automatically after 1 hour with this tab closed'}
+            </div>
+          </div>
+        )}
+
+        {/* Bridges already running on the backend (started from another tab or before a reload) */}
+        {!isRunning && serverBridges.length > 0 && (
+          <div>
+            <h3 className="text-sm font-semibold text-neutral-300 mb-2">Bridges Running on Server</h3>
+            <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-neutral-800/50">
+                  <tr>
+                    <th className="px-4 py-2 text-left text-neutral-300">Port</th>
+                    <th className="px-4 py-2 text-left text-neutral-300">Primary</th>
+                    <th className="px-4 py-2 text-left text-neutral-300">Clients</th>
+                    <th className="px-4 py-2 text-left text-neutral-300">Started</th>
+                    <th className="px-4 py-2"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {serverBridges.map((b) => (
+                    <tr key={b.bridgeId} className="border-t border-neutral-800">
+                      <td className="px-4 py-2 text-neutral-200">
+                        {b.config.listenPort}
+                        {b.persistent && <span className="ml-2 rounded-md border border-blue-700 bg-blue-900/30 px-1.5 py-0.5 text-xs text-blue-300">Persistent</span>}
+                        {!b.running && <span className="ml-2 text-xs text-yellow-400">waiting for port</span>}
+                      </td>
+                      <td className="px-4 py-2 text-neutral-400">
+                        {b.config.primaryServer.ip}:{b.config.primaryServer.port}
+                        {b.config.secondaryServers?.length > 0 && ` +${b.config.secondaryServers.length}`}
+                      </td>
+                      <td className="px-4 py-2 text-neutral-400">{b.totalClients}</td>
+                      <td className="px-4 py-2 text-neutral-400">{new Date(b.startedAt).toLocaleString()}</td>
+                      <td className="px-4 py-2 text-right whitespace-nowrap">
+                        <button
+                          onClick={() => attachBridge(b)}
+                          className="rounded-lg bg-neutral-800 px-3 py-1 text-xs text-neutral-300 hover:bg-neutral-700"
+                        >
+                          Open
+                        </button>
+                        <button
+                          onClick={() => stopServerBridge(b.bridgeId)}
+                          className="ml-2 rounded-lg bg-red-900/20 border border-red-800 px-3 py-1 text-xs text-red-300 hover:bg-red-900/30"
+                        >
+                          Stop
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
         )}
