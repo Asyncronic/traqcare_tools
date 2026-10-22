@@ -2455,6 +2455,7 @@ function TcpBridgeTool() {
   const [clients, setClients] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const pollRef = React.useRef<number | null>(null);
+  const activeIdRef = React.useRef<string | null>(null); // bridge this tab is polling; drops late responses after a switch
   const [totalLogs, setTotalLogs] = useState(0);
   // Persistent bridges keep running on the backend after this tab closes (and after backend restarts)
   const [persistent, setPersistent] = useState(() => localStorage.getItem('bridge_persistent') === 'true');
@@ -2468,16 +2469,18 @@ function TcpBridgeTool() {
     isLogsPausedRef.current = isLogsPaused;
   }, [isLogsPaused]);
 
-  // Save to localStorage
+  // Save to localStorage (form defaults only, so attaching to a bridge doesn't change other tabs' defaults)
   React.useEffect(() => {
+    if (isRunning) return;
     localStorage.setItem('bridge_listen_port', listenPort);
     localStorage.setItem('bridge_primary_ip', primaryIp);
     localStorage.setItem('bridge_primary_port', primaryPort);
     localStorage.setItem('bridge_secondary_servers', JSON.stringify(secondaryServers));
     localStorage.setItem('bridge_persistent', String(persistent));
-  }, [listenPort, primaryIp, primaryPort, secondaryServers, persistent]);
+  }, [listenPort, primaryIp, primaryPort, secondaryServers, persistent, isRunning]);
 
   const stopPolling = () => {
+    activeIdRef.current = null;
     if (pollRef.current) {
       clearInterval(pollRef.current);
       pollRef.current = null;
@@ -2486,6 +2489,7 @@ function TcpBridgeTool() {
 
   const startPolling = (id: string) => {
     stopPolling();
+    activeIdRef.current = id;
     pollStatus(id);
     pollRef.current = window.setInterval(() => pollStatus(id), 2000);
   };
@@ -2496,7 +2500,7 @@ function TcpBridgeTool() {
     setBridgeId(null);
     setIsPersistentBridge(false);
     setClients([]);
-    localStorage.removeItem('bridge_active_id');
+    sessionStorage.removeItem('bridge_active_id');
   };
 
   const fetchServerBridges = async () => {
@@ -2519,32 +2523,44 @@ function TcpBridgeTool() {
     setBridgeId(bridge.bridgeId);
     setIsPersistentBridge(!!bridge.persistent);
     setIsRunning(true);
-    localStorage.setItem('bridge_active_id', bridge.bridgeId);
+    setLogs([]);
+    setClients([]);
+    isLogsPausedRef.current = false;
+    setIsLogsPaused(false);
+    sessionStorage.setItem('bridge_active_id', bridge.bridgeId);
     startPolling(bridge.bridgeId);
   };
 
-  // On load: re-attach to the bridge this browser started, and list other running bridges
+  // Leave the bridge running on the server; this tab just stops watching it
+  const detachBridge = () => {
+    resetBridgeState();
+    setLogs([]);
+    fetchServerBridges();
+  };
+
+  // On load: re-attach to the bridge this tab was watching (sessionStorage is per tab and survives
+  // a refresh). A new tab attaches to nothing and shows the list of running bridges instead.
   React.useEffect(() => {
-    const savedId = localStorage.getItem('bridge_active_id');
+    localStorage.removeItem('bridge_active_id'); // shared key used by an earlier version
+    const savedId = sessionStorage.getItem('bridge_active_id');
     if (savedId) {
       fetch(`/api/tcp-bridge/status/${savedId}`)
         .then(r => r.json())
         .then(data => {
           if (data.ok) attachBridge(data);
-          else localStorage.removeItem('bridge_active_id');
+          else sessionStorage.removeItem('bridge_active_id');
         })
         .catch(() => {});
     }
     fetchServerBridges();
-    return stopPolling;
+    const interval = window.setInterval(fetchServerBridges, 5000);
+    return () => {
+      clearInterval(interval);
+      stopPolling();
+    };
   }, []);
 
-  // While no bridge is attached, keep the list of running bridges fresh
-  React.useEffect(() => {
-    if (isRunning) return;
-    const interval = window.setInterval(fetchServerBridges, 5000);
-    return () => clearInterval(interval);
-  }, [isRunning]);
+  const otherBridges = serverBridges.filter(b => b.bridgeId !== bridgeId);
 
   const stopServerBridge = async (id: string) => {
     if (!confirm('Stop this bridge? Devices connected to it will be disconnected.')) return;
@@ -2645,7 +2661,8 @@ function TcpBridgeTool() {
         setIsPersistentBridge(!!data.persistent);
         setIsRunning(true);
         setLogs([{ timestamp: new Date().toISOString(), type: 'info', message: data.message }]);
-        localStorage.setItem('bridge_active_id', data.bridgeId);
+        sessionStorage.setItem('bridge_active_id', data.bridgeId);
+        fetchServerBridges();
 
         // Start polling for status
         startPolling(data.bridgeId);
@@ -2686,6 +2703,7 @@ function TcpBridgeTool() {
   const pollStatus = async (id: string) => {
     try {
       const response = await fetch(`/api/tcp-bridge/status/${id}`);
+      if (activeIdRef.current !== id) return;
       if (response.status === 404) {
         // Bridge was stopped elsewhere (another tab, idle cleanup, or backend restart)
         resetBridgeState();
@@ -2695,7 +2713,7 @@ function TcpBridgeTool() {
       }
       const data = await response.json();
 
-      if (data.ok) {
+      if (data.ok && activeIdRef.current === id) {
         setClients(data.clients);
         setTotalLogs(data.totalLogs ?? data.logs.length);
         // Only update logs if not paused (use ref for current value)
@@ -2858,9 +2876,19 @@ function TcpBridgeTool() {
               {loading ? 'Starting...' : 'Start Bridge'}
             </Button>
           ) : (
-            <Button onClick={stopBridge} disabled={loading}>
-              {loading ? 'Stopping...' : 'Stop Bridge'}
-            </Button>
+            <>
+              <Button onClick={stopBridge} disabled={loading}>
+                {loading ? 'Stopping...' : 'Stop Bridge'}
+              </Button>
+              <button
+                onClick={detachBridge}
+                disabled={loading}
+                title="Stop watching this bridge in this tab; it keeps running on the server"
+                className="rounded-xl border border-neutral-800 bg-neutral-900 px-4 py-2 text-sm text-neutral-300 hover:bg-neutral-800 disabled:opacity-50"
+              >
+                Detach
+              </button>
+            </>
           )}
           <div className="flex items-center gap-2">
             <input
@@ -2897,10 +2925,12 @@ function TcpBridgeTool() {
           </div>
         )}
 
-        {/* Bridges already running on the backend (started from another tab or before a reload) */}
-        {!isRunning && serverBridges.length > 0 && (
+        {/* Bridges running on the backend other than the one this tab is watching */}
+        {otherBridges.length > 0 && (
           <div>
-            <h3 className="text-sm font-semibold text-neutral-300 mb-2">Bridges Running on Server</h3>
+            <h3 className="text-sm font-semibold text-neutral-300 mb-2">
+              {isRunning ? 'Other Bridges Running on Server' : 'Bridges Running on Server'}
+            </h3>
             <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="bg-neutral-800/50">
@@ -2913,7 +2943,7 @@ function TcpBridgeTool() {
                   </tr>
                 </thead>
                 <tbody>
-                  {serverBridges.map((b) => (
+                  {otherBridges.map((b) => (
                     <tr key={b.bridgeId} className="border-t border-neutral-800">
                       <td className="px-4 py-2 text-neutral-200">
                         {b.config.listenPort}
@@ -2931,7 +2961,7 @@ function TcpBridgeTool() {
                           onClick={() => attachBridge(b)}
                           className="rounded-lg bg-neutral-800 px-3 py-1 text-xs text-neutral-300 hover:bg-neutral-700"
                         >
-                          Open
+                          {isRunning ? 'Switch' : 'Open'}
                         </button>
                         <button
                           onClick={() => stopServerBridge(b.bridgeId)}
